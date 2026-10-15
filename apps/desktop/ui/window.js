@@ -28,6 +28,13 @@ start((s) => {
       (s.battery != null ? `${icon("battery_7_20_regular", "i16")}<span class="num">${s.battery}%</span>` : "")
     : esc(s.hint);
 
+  $("pause-icon").style.setProperty("--i", `url(icons/${s.paused ? "play" : "pause"}_20_regular.svg)`);
+  $("pause-title").firstChild.textContent = s.paused ? "Paused" : "Working automatically";
+  $("pause-sub").textContent = s.paused
+    ? "Your laptop mic is used and phone audio stays on the phone. Resume puts your settings back."
+    : "Pause uses your laptop mic, keeps phone audio on the phone and stops anything moving by itself";
+  $("pause-btn").textContent = s.paused ? "Resume" : "Pause";
+
   document.querySelectorAll('[data-setting="mic_mode"]').forEach((el) => (el.value = s.mic.mode));
   document.querySelectorAll('[data-setting="audio_mode"]').forEach((el) => (el.value = s.audio.mode));
 
@@ -46,7 +53,8 @@ start((s) => {
     ? s.decisions.slice().reverse().map((d) =>
         `<div class="entry"><span class="t num">${clock(d.at)}</span>${icon(KIND_ICON[d.icon] || "flow_20_regular", "i16")}` +
         `<div>${esc(d.text)}<div class="why">${esc(d.reason)}</div></div>` +
-        `<div><span class="link" data-act="thats_wrong" data-arg="${d.id}">${d.icon === "game" ? "Change" : "That's wrong"}</span></div></div>`).join("")
+        `<div>${d.undoable ? `<span class="link" data-act="thats_wrong" data-arg="${d.id}" title="Put it back, and remember for next time">${d.icon === "game" ? "Change" : "Undo"}</span>`
+          : d.corrected ? `<span class="sub">Undone</span>` : ""}</div></div>`).join("")
     : `<div class="empty">Nothing yet today.</div>`;
 
   $("auto-switch").classList.toggle("on", s.smart_auto);

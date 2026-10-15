@@ -48,8 +48,10 @@ fn act(h: tauri::State<core::Handle>, action: String, arg: Option<String>) {
     let _ = h.tx.send(core::Msg::Act { action, arg });
 }
 
+// Async on purpose: a synchronous command that builds a window deadlocks on Windows (the build waits for the
+// event loop, which is waiting for the command). The first open from the flyout froze the app that way.
 #[tauri::command]
-fn open_window(app: AppHandle, page: String) {
+async fn open_window(app: AppHandle, page: String) {
     show_main(&app, &page);
 }
 
@@ -213,6 +215,15 @@ pub fn set_tray_tooltip(app: &AppHandle, text: &str) {
     }
 }
 
+/// The tray menu's Pause item, so its label can follow the state.
+struct PauseItem(MenuItem<tauri::Wry>);
+
+pub fn set_pause_label(app: &AppHandle, paused: bool) {
+    if let Some(p) = app.try_state::<PauseItem>() {
+        let _ = p.0.set_text(if paused { "Resume TRUE Phone Link" } else { "Pause TRUE Phone Link" });
+    }
+}
+
 pub fn autostart_enabled(app: &AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
 }
@@ -262,8 +273,13 @@ fn main() {
             let open = MenuItem::with_id(app, "open", "Open TRUE Phone Link", true, None::<&str>)?;
             let mark = MenuItem::with_id(app, "mark", "Mark a problem now", true, None::<&str>)?;
             let logs = MenuItem::with_id(app, "logs", "Open the log folder", true, None::<&str>)?;
+            let pause = MenuItem::with_id(app, "pause", "Pause TRUE Phone Link", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &mark, &logs, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &pause, &mark, &logs, &quit])?;
+            app.manage(PauseItem(pause));
+            // The brain may have published before the item existed (started paused): catch up from its snapshot.
+            let paused = app.state::<core::Handle>().snapshot.lock().unwrap()["paused"].as_bool() == Some(true);
+            set_pause_label(app.handle(), paused);
             TrayIconBuilder::with_id("tray")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .tooltip("TRUE Phone Link")
@@ -271,9 +287,10 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app, "home"),
-                    "mark" => {
+                    "mark" | "pause" => {
+                        let action = if e.id.as_ref() == "mark" { "mark" } else { "toggle_pause" };
                         let h = app.state::<core::Handle>();
-                        let _ = h.tx.send(core::Msg::Act { action: "mark".into(), arg: None });
+                        let _ = h.tx.send(core::Msg::Act { action: action.into(), arg: None });
                     }
                     "logs" => {
                         if let Some(d) = log::dir() {

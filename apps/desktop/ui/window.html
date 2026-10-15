@@ -84,6 +84,11 @@
   <div class="content" id="content">
     <section class="page" id="p-home">
       <h1>Home</h1>
+      <div class="card">
+        <i class="i" id="pause-icon"></i>
+        <div class="body" id="pause-title">Pause<div class="sub" id="pause-sub"></div></div>
+        <div class="right"><div class="btn" id="pause-btn" data-act="toggle_pause"></div></div>
+      </div>
       <div class="card click" data-page="microphone">
         <i class="i" style="--i:url(icons/mic_20_regular.svg)"></i>
         <div class="body">Microphone<div class="sub" id="home-mic"></div></div>
@@ -106,7 +111,7 @@
       <div class="log">
         <div class="hd">
           <i class="i" style="--i:url(icons/flow_20_regular.svg)"></i>
-          <div class="body">Decisions<div class="sub">If one was wrong, say so and it will do the other thing next time</div></div>
+          <div class="body">Decisions<div class="sub">Undo puts it back, and it does the other thing next time</div></div>
         </div>
         <div id="log"></div>
       </div>

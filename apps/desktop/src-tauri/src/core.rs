@@ -61,11 +61,21 @@ struct Settings {
     smart_auto: bool,
     /// Auto-start was switched on at first run (his ruling: start with Windows); after that it's his switch.
     autostart_set: bool,
+    /// Set while paused: the settings to put back on Resume. Pausing means laptop mic, phone audio on the
+    /// phone, and nothing automatic — Windows as if the app weren't there, but Discord keeps a working mic.
+    paused: Option<Paused>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Paused {
+    mic_mode: MicMode,
+    audio_mode: AudioMode,
+    smart_auto: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { mic_mode: MicMode::Auto, audio_mode: AudioMode::Auto, smart_auto: true, autostart_set: false }
+        Self { mic_mode: MicMode::Auto, audio_mode: AudioMode::Auto, smart_auto: true, autostart_set: false, paused: None }
     }
 }
 
@@ -398,6 +408,13 @@ impl Core {
             log::line(format!("ui: {action} {}", arg.unwrap_or("")));
         }
         let st = self.engine.state();
+        // Changing the mic, audio or Smart auto by hand while paused means he has taken over: no longer paused.
+        if self.settings.paused.is_some()
+            && matches!(action, "toggle_mic" | "mic_mode" | "audio_mode" | "toggle_audio" | "toggle_auto" | "hand_back")
+        {
+            self.settings.paused = None;
+            self.save_settings();
+        }
         match action {
             "mark" => {
                 let mut snap = self.snapshot.lock().unwrap().clone();
@@ -408,6 +425,25 @@ impl Core {
                 log::line("=== MARK: problem flagged from the tray around here ===");
                 log::line(format!("state at mark: {snap}"));
                 log::line(format!("engine at mark: {st:?}"));
+            }
+            "toggle_pause" => {
+                if let Some(p) = self.settings.paused.take() {
+                    log::line("resumed: settings put back");
+                    self.set_mic_mode(p.mic_mode);
+                    self.set_audio_mode(p.audio_mode);
+                    self.settings.smart_auto = p.smart_auto;
+                    self.save_settings();
+                    self.feed(Event::SetSmartAuto { on: p.smart_auto });
+                } else {
+                    log::line("paused: laptop mic, phone audio on the phone, Smart auto off");
+                    self.settings.paused =
+                        Some(Paused { mic_mode: st.mic_mode, audio_mode: st.audio_mode, smart_auto: st.smart_auto });
+                    self.banner = None;
+                    self.settings.smart_auto = false;
+                    self.feed(Event::SetSmartAuto { on: false });
+                    self.set_mic_mode(MicMode::Laptop);
+                    self.set_audio_mode(AudioMode::Phone);
+                }
             }
             "toggle_mic" => {
                 let mode = if st.mic_mode == MicMode::Laptop { MicMode::Auto } else { MicMode::Laptop };
@@ -544,7 +580,8 @@ impl Core {
                     (_, DecisionKind::MovedToPebble | DecisionKind::KeptOnPebble) => "speaker",
                     _ => "phone",
                 };
-                json!({"id": d.id, "at": d.at_ms, "icon": icon, "text": d.text, "reason": d.reason, "corrected": d.corrected})
+                let undoable = !d.corrected && d.situation.is_some();
+                json!({"id": d.id, "at": d.at_ms, "icon": icon, "text": d.text, "reason": d.reason, "corrected": d.corrected, "undoable": undoable})
             })
             .collect();
         let rules: Vec<Value> = self
@@ -573,6 +610,7 @@ impl Core {
             "version": env!("CARGO_PKG_VERSION"),
             "autostart": crate::autostart_enabled(&self.app),
             "smart_auto": st.smart_auto,
+            "paused": self.settings.paused.is_some(),
             "mic": {
                 "mode": st.mic_mode, "live": live, "app": st.mic_users.first().map(|a| friendly_name(a)),
                 "level_db": level_db, "delay_ms": self.mic.delay_ms.load(Ordering::Relaxed) + 32, "why": mic_why,
@@ -591,7 +629,10 @@ impl Core {
         let text = state.to_string();
         if text != self.last_json {
             self.last_json = text;
-            crate::set_tray_tooltip(&self.app, &tooltip(connected, &hint, live, &playing, st.phone_audio));
+            let paused = self.settings.paused.is_some();
+            let tip = tooltip(connected, &hint, live, &playing, st.phone_audio);
+            crate::set_tray_tooltip(&self.app, &if paused { format!("{tip}\nPaused") } else { tip });
+            crate::set_pause_label(&self.app, paused);
             *self.snapshot.lock().unwrap() = state.clone();
             let _ = self.app.emit("state", state);
         }

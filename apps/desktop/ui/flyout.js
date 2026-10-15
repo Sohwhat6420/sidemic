@@ -47,8 +47,20 @@ start((s) => {
   }
   vol.disabled = !s.connected;
 
-  // What's happening now: at most two lines.
+  // What's happening now, in plain words.
   const lines = [];
+  const line = (ic, text, muted, action) =>
+    `<div class="line">${icon(ic)}<div class="txt">${text}<div class="muted">${muted}</div></div>${action || ""}</div>`;
+  if (s.paused) {
+    lines.push(line("pause_20_regular", "Paused",
+      "Your laptop mic is used, phone audio stays on the phone, and nothing moves by itself",
+      `<span class="link" data-act="toggle_pause">Resume</span>`));
+  } else if (s.connected && s.mic.live === "off" && !s.audio.playing) {
+    lines.push(line("checkmark_circle_16_filled", "Ready, nothing to do",
+      s.smart_auto
+        ? "The phone mic turns on when an app listens. Phone media moves to the speaker while the laptop is quiet."
+        : "The phone mic turns on when an app listens. Smart auto is off, so phone audio stays where you put it."));
+  }
   if (s.mic.live !== "off") {
     const who = s.mic.app ? `${esc(s.mic.app)} is using` : "Apps are using";
     lines.push(`<div class="line">${icon("person_voice_20_regular")}<div class="txt">${who} your ${s.mic.live === "phone" ? "phone" : "laptop"} mic` +
@@ -60,7 +72,17 @@ start((s) => {
       `<div class="muted">${esc(s.audio.why || "")}</div></div>` +
       (s.audio.on_speaker ? `<span class="link" data-act="hand_back">Hand back</span>` : "") + `</div>`);
   }
+  // The last thing Smart auto did, with a one-click undo, for half an hour.
+  const d = s.decisions[s.decisions.length - 1];
+  if (d && Date.now() - d.at < 30 * 60 * 1000) {
+    lines.push(line("arrow_undo_16_regular", `${esc(d.text)} <span class="muted">at ${clock(d.at)}</span>`,
+      d.corrected ? "Undone. It will remember next time." : esc(d.reason),
+      d.undoable ? `<span class="link" data-act="thats_wrong" data-arg="${d.id}" title="Put it back, and remember for next time">Undo</span>` : ""));
+  }
   $("status").innerHTML = lines.join("");
+
+  $("pause").innerHTML = s.paused ? `${icon("play_20_regular", "i16")}Resume` : `${icon("pause_20_regular", "i16")}Pause`;
+  $("pause").title = s.paused ? "Turn TRUE Phone Link back on, as it was" : "Use the laptop mic, keep phone audio on the phone, and stop moving things automatically";
 
   // A question or notice from Smart auto.
   const b = s.banner;

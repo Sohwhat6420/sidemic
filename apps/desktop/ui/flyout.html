@@ -61,6 +61,9 @@
             display: flex; align-items: center; padding: 0 12px 0 20px; gap: 6px; }
   .footer .grow { flex: 1; display: flex; align-items: center; gap: 8px; }
   .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
+  .btn.small { height: 28px; padding: 0 10px; font-size: 12px; margin-right: 4px; }
+  .btn.small:hover { background: var(--control-hover); }
+  .line .link { flex: none; }
   .icon-btn { width: 36px; height: 36px; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
   .icon-btn:hover { background: var(--subtle-hover); }
 </style>
@@ -116,6 +119,7 @@
 
   <div class="footer">
     <div class="grow caption"><span>TRUE Phone Link</span><span class="dot" id="delay-dot"></span><span class="num" id="delay"></span></div>
+    <div class="btn small" id="pause" data-act="toggle_pause"></div>
     <div class="icon-btn" data-open="home" title="Open TRUE Phone Link"><i class="i" style="--i:url(icons/open_20_regular.svg)"></i></div>
     <div class="icon-btn" data-open="connection" title="Settings"><i class="i" style="--i:url(icons/settings_20_regular.svg)"></i></div>
   </div>
