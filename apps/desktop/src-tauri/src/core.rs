@@ -661,7 +661,9 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
         let mut error = None;
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(A2dpCmd::Open(hint)) => {
-                if let Err(e) = link.open(&hint) {
+                let r = link.open(&hint);
+                eprintln!("a2dp open({hint}) -> {r:?}, state {:?}", link.state());
+                if let Err(e) = r {
                     error = Some(e);
                     available = false; // tells the engine phone audio is still on the phone
                     next_scan = Instant::now() + Duration::from_secs(5);
@@ -673,6 +675,7 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
         }
         let mut now_available = available;
         if link.is_open() && !link.is_live() {
+            eprintln!("a2dp dropped, state {:?}", link.state());
             link.close();
             now_available = false;
             next_scan = Instant::now() + Duration::from_secs(5);

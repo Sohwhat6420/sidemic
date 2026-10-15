@@ -19,6 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThre
 #[derive(Default)]
 pub struct A2dp {
     conn: Option<AudioPlaybackConnection>,
+    /// Windows reports Opened only while audio is actually flowing, and Closed both before the first sound and
+    /// after a real drop. So Closed only means "dropped" once Opened has been seen.
+    seen_opened: bool,
 }
 
 impl A2dp {
@@ -62,12 +65,24 @@ impl A2dp {
         Ok(name)
     }
 
-    /// True while the link is really up (it drops when the phone goes out of range or Bluetooth is turned off).
-    pub fn is_live(&self) -> bool {
-        self.conn.as_ref().is_some_and(|c| c.State().is_ok_and(|st| st == AudioPlaybackConnectionState::Opened))
+    /// False once the link has dropped (it drops when the phone goes out of range or Bluetooth is turned off).
+    pub fn is_live(&mut self) -> bool {
+        match self.state() {
+            Some(AudioPlaybackConnectionState::Opened) => {
+                self.seen_opened = true;
+                true
+            }
+            Some(_) => !self.seen_opened,
+            None => false,
+        }
+    }
+
+    pub fn state(&self) -> Option<AudioPlaybackConnectionState> {
+        self.conn.as_ref().and_then(|c| c.State().ok())
     }
 
     pub fn close(&mut self) {
+        self.seen_opened = false;
         if let Some(c) = self.conn.take() {
             let _ = c.Close();
         }
