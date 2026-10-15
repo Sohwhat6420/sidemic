@@ -24,6 +24,8 @@ import java.util.Map;
  *   record  record N seconds to WAV (raw, plus the DSP chain's output when dsp=1) for A/B measurement
  *   stream  warm server on localabstract:tpl_mic; the mic starts only while a client is connected.
  *           Sends raw s16le mono 48 kHz (after the DSP chain unless dsp=0).
+ *   wallpaper  report the lock/home wallpapers and save thumbnails to {out}-lock.png / {out}-home.png
+ *              watch=1 keeps {out}-lock.png current and prints "wallpaper-changed lock id=N" on each change
  *
  * Common keys: source=voice-recognition|camcorder|unprocessed|mic|voice-communication|voice-performance
  *              channels=1|2  mix=avg|left|right  ns|agc|aec=on|off|default  dsp=1|0  debug=1
@@ -50,6 +52,12 @@ public final class Main {
                 record(o);
             } else if ("stream".equals(mode)) {
                 stream(o);
+            } else if ("wallpaper".equals(mode)) {
+                if ("1".equals(o.get("watch"))) {
+                    Wallpaper.watch(get(o, "out", "/data/local/tmp/tpl/wallpaper"), Long.parseLong(get(o, "every", "2000")));
+                } else {
+                    Wallpaper.probe(get(o, "out", "/data/local/tmp/tpl/wallpaper"));
+                }
             } else {
                 throw new IllegalArgumentException("unknown mode: " + mode);
             }
