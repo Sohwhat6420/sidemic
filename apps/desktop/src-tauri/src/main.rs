@@ -5,6 +5,7 @@
 
 mod adb;
 mod core;
+mod log;
 mod mic;
 mod phone;
 mod wasapi;
@@ -225,13 +226,18 @@ pub fn set_autostart(app: &AppHandle, on: bool) {
 
 /// The jar and voice library pushed to the phone: bundled resources when installed, the build output in dev.
 fn phone_dir(app: &AppHandle) -> PathBuf {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../phone-server/out");
+    // A dev build's resource copy is frozen at its last cargo build; the phone server rebuilds separately.
+    if cfg!(debug_assertions) && dev.join("tpl-server.jar").exists() {
+        return dev;
+    }
     if let Ok(r) = app.path().resource_dir() {
         let p = r.join("phone");
         if p.join("tpl-server.jar").exists() {
             return p;
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../phone-server/out")
+    dev
 }
 
 fn main() {
@@ -242,13 +248,22 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let data = app.path().app_data_dir()?;
+            log::init(data.join("logs"));
+            let at_sign_in = std::env::args().any(|a| a == AUTOSTART_ARG);
+            log::line(format!(
+                "TRUE Phone Link {} started{}",
+                env!("CARGO_PKG_VERSION"),
+                if at_sign_in { " at sign-in" } else { "" }
+            ));
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));
 
             build_flyout(&handle)?;
 
             let open = MenuItem::with_id(app, "open", "Open TRUE Phone Link", true, None::<&str>)?;
+            let mark = MenuItem::with_id(app, "mark", "Mark a problem now", true, None::<&str>)?;
+            let logs = MenuItem::with_id(app, "logs", "Open the log folder", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &mark, &logs, &quit])?;
             TrayIconBuilder::with_id("tray")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .tooltip("TRUE Phone Link")
@@ -256,6 +271,15 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app, "home"),
+                    "mark" => {
+                        let h = app.state::<core::Handle>();
+                        let _ = h.tx.send(core::Msg::Act { action: "mark".into(), arg: None });
+                    }
+                    "logs" => {
+                        if let Some(d) = log::dir() {
+                            let _ = std::process::Command::new("explorer.exe").arg(d).spawn();
+                        }
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -286,7 +310,10 @@ fn main() {
     app.run(|_, e| match e {
         // Closing the window keeps the tray app running; only Quit exits.
         RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
-        RunEvent::Exit => core::shutdown(),
+        RunEvent::Exit => {
+            log::line("quitting");
+            core::shutdown();
+        }
         _ => {}
     });
 }

@@ -52,6 +52,26 @@ final class Workarounds {
         fillConfigurationController();
         fillAppInfo();
         fillAppContext();
+        fillMediaServiceManager();
+    }
+
+    /**
+     * An app's ActivityThread registers the media service wrappers at bind time; app_process never does, so
+     * MediaSessionManager (watching phone media, and the test session) dies with a NullPointerException.
+     */
+    private static void fillMediaServiceManager() {
+        // MediaSessionManager reads the platform holder; the mainline module reads its own. Fill whichever exist.
+        for (String holder : new String[] {"android.media.MediaFrameworkPlatformInitializer", "android.media.MediaFrameworkInitializer"}) {
+            try {
+                Class<?> init = Class.forName(holder);
+                Class<?> mgrClass = Class.forName("android.media.MediaServiceManager");
+                Constructor<?> ctor = mgrClass.getDeclaredConstructor();
+                ctor.setAccessible(true);
+                init.getDeclaredMethod("setMediaServiceManager", mgrClass).invoke(null, ctor.newInstance());
+            } catch (Throwable t) {
+                Log.d("Could not fill " + holder + ": " + t);
+            }
+        }
     }
 
     private static void fillAppInfo() {

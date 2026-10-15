@@ -54,6 +54,10 @@ public final class Main {
                 record(o);
             } else if ("stream".equals(mode)) {
                 stream(o);
+            } else if ("media".equals(mode)) {
+                TestPlay.probe(System.out);
+            } else if ("testplay".equals(mode)) {
+                TestPlay.run(o, System.out);
             } else if ("serve".equals(mode)) {
                 Serve.run(o);
             } else if ("wallpaper".equals(mode)) {

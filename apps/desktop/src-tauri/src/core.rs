@@ -23,7 +23,7 @@ use windows::Win32::Media::Audio::eCapture;
 use crate::adb::{Adb, DeviceState};
 use crate::mic::{self, MicStatus, Route};
 use crate::phone::{PhoneControl, PhoneEvent};
-use crate::{wasapi, winrt};
+use crate::{log, wasapi, winrt};
 
 /// Everything the brain hears about.
 pub enum Msg {
@@ -101,6 +101,8 @@ struct Core {
     snapshot: Arc<Mutex<Value>>,
     last_json: String,
     last_now: u64,
+    pings: Vec<u32>,
+    last_live: String,
 }
 
 pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
@@ -170,6 +172,8 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
         snapshot: snapshot.clone(),
         last_json: String::new(),
         last_now: 0,
+        pings: Vec::new(),
+        last_live: "off".into(),
     };
     thread::Builder::new().name("tpl-core".into()).spawn(move || core.run(rx)).unwrap();
     Handle { tx, snapshot }
@@ -205,7 +209,21 @@ impl Core {
 
         let mut next_ping = Instant::now();
         let mut next_speaker = Instant::now();
+        let mut next_stats = Instant::now() + Duration::from_secs(900);
         loop {
+            if Instant::now() >= next_stats {
+                next_stats = Instant::now() + Duration::from_secs(900);
+                if !self.pings.is_empty() {
+                    let max = self.pings.iter().max().copied().unwrap_or(0);
+                    let avg = self.pings.iter().sum::<u32>() / self.pings.len() as u32;
+                    log::line(format!(
+                        "stats (15 min): ping avg {avg} ms, max {max} ms over {} pings; battery {:?}%",
+                        self.pings.len(),
+                        self.battery
+                    ));
+                    self.pings.clear();
+                }
+            }
             // Wake for the next message, the engine's next timer, or a 250 ms UI refresh, whichever is first.
             let mut wait = Duration::from_millis(250);
             if let Some(d) = self.engine.next_deadline() {
@@ -239,6 +257,7 @@ impl Core {
         match msg {
             Msg::Phone(ev) => match ev {
                 PhoneEvent::Hello { name, model } => {
+                    log::line(format!("phone said hello: {name} ({model})"));
                     self.name = Some(if name.is_empty() { model } else { name });
                     self.link_changed();
                 }
@@ -254,21 +273,34 @@ impl Core {
                 }
                 PhoneEvent::Pong => {
                     if let Some(t) = self.ping_sent.take() {
-                        self.ping_ms = Some(t.elapsed().as_millis() as u32);
+                        let ms = t.elapsed().as_millis() as u32;
+                        self.ping_ms = Some(ms);
+                        self.pings.push(ms);
+                        if ms > 200 {
+                            log::line(format!("slow ping: {ms} ms"));
+                        }
                     }
                 }
                 PhoneEvent::Gone => {
+                    log::line("phone control channel closed");
                     self.ping_ms = None;
                     self.link_changed();
                 }
             },
             Msg::Link(l) => {
                 if l != self.link {
+                    log::line(format!("phone link: {l:?}"));
                     self.link = l;
                     self.link_changed();
                 }
             }
             Msg::A2dp { available, error } => {
+                if let Some(e) = &error {
+                    log::line(format!("bluetooth audio error: {e}"));
+                }
+                if available != self.a2dp_available {
+                    log::line(format!("bluetooth audio available: {available}"));
+                }
                 if error.is_some() {
                     self.a2dp_error = error;
                 }
@@ -279,7 +311,7 @@ impl Core {
             }
             Msg::Laptop(ev) => self.feed(ev),
             Msg::MicNote(n) => {
-                eprintln!("{n}");
+                log::line(&n);
                 self.mic_note = Some(n);
             }
             Msg::Act { action, arg } => self.act(&action, arg.as_deref()),
@@ -296,8 +328,16 @@ impl Core {
         let now = epoch_ms().max(self.last_now);
         self.last_now = now;
         let memory_before = self.engine.memory().to_json();
+        if !matches!(ev, Event::Tick) {
+            log::line(format!("event {ev:?}"));
+        }
+        let last_decision = self.engine.decisions().last().map(|d| d.id);
         for a in self.engine.handle(now, ev) {
+            log::line(format!("  -> {a:?}"));
             self.run_action(a);
+        }
+        for d in self.engine.decisions().iter().filter(|d| last_decision.is_none_or(|l| d.id > l)) {
+            log::line(format!("decision #{}: {} ({})", d.id, d.text, d.reason));
         }
         let memory_after = self.engine.memory().to_json();
         if memory_after != memory_before {
@@ -354,8 +394,21 @@ impl Core {
     }
 
     fn act(&mut self, action: &str, arg: Option<&str>) {
+        if action != "volume" {
+            log::line(format!("ui: {action} {}", arg.unwrap_or("")));
+        }
         let st = self.engine.state();
         match action {
+            "mark" => {
+                let mut snap = self.snapshot.lock().unwrap().clone();
+                if let Some(o) = snap.as_object_mut() {
+                    o.remove("wallpaper");
+                    o.remove("decisions");
+                }
+                log::line("=== MARK: problem flagged from the tray around here ===");
+                log::line(format!("state at mark: {snap}"));
+                log::line(format!("engine at mark: {st:?}"));
+            }
             "toggle_mic" => {
                 let mode = if st.mic_mode == MicMode::Laptop { MicMode::Auto } else { MicMode::Laptop };
                 self.set_mic_mode(mode);
@@ -414,7 +467,7 @@ impl Core {
                     self.ctl.volume(v.clamp(0.0, 1.0));
                 }
             }
-            _ => eprintln!("unknown action {action}"),
+            _ => log::line(format!("unknown action {action}")),
         }
         self.publish();
     }
@@ -456,6 +509,13 @@ impl Core {
             _ => "off",
         };
         let level_db = self.mic.level.load(Ordering::Relaxed) as f64 / 10.0 - 100.0;
+        if live != self.last_live {
+            log::line(format!(
+                "mic now: {live} (mic delay {} ms incl. 32 ms on the phone)",
+                self.mic.delay_ms.load(Ordering::Relaxed) + 32
+            ));
+            self.last_live = live.to_owned();
+        }
         let mic_why = if live == "laptop" && st.mic_mode != MicMode::Laptop {
             if !connected { "The phone isn't connected".to_owned() } else { "Waiting for the phone's mic".to_owned() }
         } else {
@@ -662,20 +722,23 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(A2dpCmd::Open(hint)) => {
                 let r = link.open(&hint);
-                eprintln!("a2dp open({hint}) -> {r:?}, state {:?}", link.state());
+                log::line(format!("bluetooth audio open ({hint}): {r:?}"));
                 if let Err(e) = r {
                     error = Some(e);
                     available = false; // tells the engine phone audio is still on the phone
                     next_scan = Instant::now() + Duration::from_secs(5);
                 }
             }
-            Ok(A2dpCmd::Close) => link.close(),
+            Ok(A2dpCmd::Close) => {
+                log::line("bluetooth audio closed");
+                link.close();
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
         let mut now_available = available;
         if link.is_open() && !link.is_live() {
-            eprintln!("a2dp dropped, state {:?}", link.state());
+            log::line(format!("bluetooth audio dropped, state {:?}", link.state()));
             link.close();
             now_available = false;
             next_scan = Instant::now() + Duration::from_secs(5);
@@ -715,7 +778,18 @@ fn laptop_thread(tx: Sender<Msg>) {
     let (mut mic_users, mut sounds, mut media) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     let mut fg: (Option<String>, bool) = (None, false);
     let mut n = 0u64;
+    let debug = std::env::var_os("TPL_DEBUG").is_some();
+    let mut last_debug = String::new();
     loop {
+        if debug && n % 4 == 0 {
+            let rows = wasapi::default_render().and_then(|(d, _)| wasapi::session_debug(&d)).unwrap_or_default().join(", ");
+            let media = winrt::laptop_media().unwrap_or_default().iter().map(|(a, t)| format!("{a} [{t}]")).collect::<Vec<_>>().join(", ");
+            let line = format!("render: {rows} | media: {media}");
+            if line != last_debug {
+                eprintln!("{line}");
+                last_debug = line;
+            }
+        }
         let now_mic = wasapi::find(eCapture, |n| n.contains("CABLE Output"))
             .and_then(|(d, _)| wasapi::active_sessions(&d))
             .map(|p| names(p, &[]))

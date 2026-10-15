@@ -232,6 +232,30 @@ pub fn sounding_sessions(d: &IMMDevice) -> Result<Vec<u32>> {
     Ok(pids)
 }
 
+/// Every active session on this endpoint as "name pid peak", for the TPL_DEBUG log.
+pub fn session_debug(d: &IMMDevice) -> Result<Vec<String>> {
+    let mut rows = Vec::new();
+    unsafe {
+        let mgr: IAudioSessionManager2 = d.Activate(CLSCTX_ALL, None)?;
+        let list = mgr.GetSessionEnumerator()?;
+        for i in 0..list.GetCount()? {
+            let s = list.GetSession(i)?;
+            if s.GetState()? != AudioSessionStateActive {
+                continue;
+            }
+            let s2: IAudioSessionControl2 = s.cast()?;
+            let pid = s2.GetProcessId().unwrap_or(0);
+            let peak = s
+                .cast::<windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation>()
+                .and_then(|m| m.GetPeakValue())
+                .unwrap_or(-1.0);
+            let sys = s2.IsSystemSoundsSession() == S_OK;
+            rows.push(format!("{}#{pid} peak={peak:.4}{}", process_name(pid).unwrap_or_default(), if sys { " (system)" } else { "" }));
+        }
+    }
+    Ok(rows)
+}
+
 /// "Discord.exe" for a process id, or None if it's gone or protected.
 pub fn process_name(pid: u32) -> Option<String> {
     if pid == 0 {
