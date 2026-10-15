@@ -44,6 +44,28 @@ final class Wallpaper {
         }
     }
 
+    /** A small JPEG of one wallpaper (lock or home) for the laptop UI, or null when the phone won't hand it over. */
+    static byte[] jpeg(WallpaperManager wm, int which) throws IOException {
+        ParcelFileDescriptor pfd = wm.getWallpaperFile(which);
+        if (pfd == null) {
+            return null;
+        }
+        Bitmap b;
+        try {
+            b = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+        } finally {
+            pfd.close();
+        }
+        if (b == null) {
+            return null;
+        }
+        int w = 360;
+        int h = Math.round(w * (float) b.getHeight() / b.getWidth());
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        Bitmap.createScaledBitmap(b, w, h, true).compress(Bitmap.CompressFormat.JPEG, 88, out);
+        return out.toByteArray();
+    }
+
     /** Writes a thumbnail of one wallpaper (lock or home). Returns false when the phone won't hand it over. */
     static boolean export(WallpaperManager wm, int which, String path) throws IOException {
         ParcelFileDescriptor pfd = wm.getWallpaperFile(which);

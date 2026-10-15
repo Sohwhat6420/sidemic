@@ -24,6 +24,8 @@ import java.util.Map;
  *   record  record N seconds to WAV (raw, plus the DSP chain's output when dsp=1) for A/B measurement
  *   stream  warm server on localabstract:tpl_mic; the mic starts only while a client is connected.
  *           Sends raw s16le mono 48 kHz (after the DSP chain unless dsp=0).
+ *   serve   what the laptop app runs: the mic on localabstract:tpl_mic (as stream) plus a control channel on
+ *           localabstract:tpl_ctl (JSON lines: battery, media, wallpaper out; media and volume commands in)
  *   wallpaper  report the lock/home wallpapers and save thumbnails to {out}-lock.png / {out}-home.png
  *              watch=1 keeps {out}-lock.png current and prints "wallpaper-changed lock id=N" on each change
  *
@@ -52,6 +54,8 @@ public final class Main {
                 record(o);
             } else if ("stream".equals(mode)) {
                 stream(o);
+            } else if ("serve".equals(mode)) {
+                Serve.run(o);
             } else if ("wallpaper".equals(mode)) {
                 if ("1".equals(o.get("watch"))) {
                     Wallpaper.watch(get(o, "out", "/data/local/tmp/tpl/wallpaper"), Long.parseLong(get(o, "every", "2000")));
@@ -202,11 +206,18 @@ public final class Main {
 
     private static void stream(Map<String, String> o) throws IOException {
         boolean useDsp = !"0".equals(get(o, "dsp", "1"));
-        String mix = get(o, "mix", "avg");
         LocalServerSocket server = new LocalServerSocket("tpl_mic");
         Log.i("listening on localabstract:tpl_mic (dsp=" + (useDsp ? "on" : "off") + ")");
         while (true) {
-            LocalSocket client = server.accept();
+            micClient(o, server.accept());
+        }
+    }
+
+    /** Streams the mic to one client until it disconnects. The mic is only on while a client is connected. */
+    static void micClient(Map<String, String> o, LocalSocket client) {
+        boolean useDsp = !"0".equals(get(o, "dsp", "1"));
+        String mix = get(o, "mix", "avg");
+        { // one client session
             long t0 = SystemClock.elapsedRealtime();
             Log.i("client connected; starting mic");
             MicCapture cap = null;
