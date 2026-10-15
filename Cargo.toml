@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voice", "crates/voice-bench", "crates/voice-jni"]
+members = ["crates/voice", "crates/voice-bench", "crates/voice-jni", "crates/policy", "apps/desktop/src-tauri"]
 
 [workspace.package]
 edition = "2021"

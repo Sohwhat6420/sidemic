@@ -1,0 +1,49 @@
+[package]
+name = "tpl-desktop"
+version = "0.1.0"
+description = "TRUE Phone Link: your phone as the laptop's microphone and speaker source"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "true-phone-link"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+tpl-policy = { path = "../../../crates/policy" }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+    "Foundation",
+    "Foundation_Collections",
+    "Devices_Enumeration",
+    "Media_Audio",
+    "Media_Control",
+    "UI",
+    "UI_ViewManagement",
+]

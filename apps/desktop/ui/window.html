@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>TRUE Phone Link</title>
+<link rel="stylesheet" href="fluent.css">
+<style>
+  /* The window is Mica (set by the app) with the normal Windows title bar; the page draws on top of it. */
+  html, body { height: 100%; background: transparent; overflow: hidden; user-select: none; cursor: default; }
+  .window { position: absolute; inset: 0; display: grid; grid-template-columns: 300px 1fr; }
+
+  /* Phone Link's signature: the phone's wallpaper, frosted, behind the left pane. */
+  .backdrop { position: absolute; left: 0; top: 0; bottom: 0; width: 300px; overflow: hidden; pointer-events: none; }
+  .backdrop::before { content: ""; position: absolute; inset: -80px; background: var(--wallpaper, none) center / cover;
+                      filter: blur(48px) saturate(1.1); }
+  .backdrop::after { content: ""; position: absolute; inset: 0;
+                     background: linear-gradient(to right, rgba(32,32,32,0.70), rgba(32,32,32,0.86) 85%, rgba(32,32,32,0.95)); }
+
+  .nav { position: relative; padding: 4px 8px 0 12px; display: flex; flex-direction: column; }
+  .account { display: flex; align-items: center; gap: 14px; padding: 10px 8px 18px; }
+  .phone { width: 40px; height: 86px; border-radius: 8px; flex: none; margin-left: 12px; background: #000 var(--wallpaper, none) center / cover;
+           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12), 0 4px 10px rgba(0,0,0,0.3); }
+  .off .phone { filter: grayscale(1) brightness(0.6); }
+  .account .name { font-weight: 600; font-size: 14px; }
+  .ok { color: #6ccb5f; }
+  .status-row { display: flex; align-items: center; gap: 6px; }
+  .item { height: 36px; border-radius: 4px; display: flex; align-items: center; gap: 14px; padding: 0 12px; position: relative; margin: 2px 0; }
+  .item:hover { background: var(--subtle-hover); }
+  .item.sel { background: var(--subtle-hover); }
+  .item.sel::before { content: ""; position: absolute; left: 0; top: 10px; width: 3px; height: 16px; border-radius: 2px; background: var(--accent); }
+
+  .content { background: var(--layer); border-top-left-radius: 8px; border: 1px solid var(--stroke); border-right: 0; border-bottom: 0;
+             padding: 30px 40px 40px; overflow-y: auto; position: relative; }
+  h1 { font-family: var(--font-display); font-size: 28px; line-height: 36px; font-weight: 600; margin-bottom: 26px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 22px 0 8px; }
+
+  .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 4px; min-height: 68px; padding: 12px 16px;
+          display: flex; align-items: center; gap: 16px; margin-bottom: 4px; }
+  .card .body { flex: 1; }
+  .sub { font-size: 12px; line-height: 16px; color: var(--text-2); }
+  .card .right { display: flex; align-items: center; gap: 12px; color: var(--text-2); }
+  .card.click:hover { background: #323232; }
+  select.combo { color: var(--text); font: inherit; appearance: none; -webkit-appearance: none; cursor: pointer;
+                 background: var(--control) url(icons/chevron_down_16_regular.svg) no-repeat right 10px center / 12px; padding-right: 32px; }
+  select.combo option { background: #2c2c2c; }
+  .switch { cursor: pointer; }
+  .btn { cursor: pointer; }
+  .btn:hover { background: var(--control-hover); }
+  .link { cursor: pointer; }
+  .link:hover { text-decoration: underline; }
+
+  .log { background: var(--card); border: 1px solid var(--card-border); border-radius: 4px; }
+  .log .hd { display: flex; align-items: center; gap: 16px; padding: 14px 16px; }
+  .log .hd .body { flex: 1; }
+  .entry { display: grid; grid-template-columns: 56px 20px 1fr auto; align-items: center; gap: 0 14px; padding: 10px 16px; border-top: 1px solid var(--divider); }
+  .entry .t { color: var(--text-3); font-size: 12px; }
+  .entry .why { font-size: 12px; line-height: 16px; color: var(--text-2); }
+  .empty { padding: 14px 16px; border-top: 1px solid var(--divider); color: var(--text-2); font-size: 12px; }
+  .info { background: rgba(255,255,255,0.04); border: 1px solid var(--stroke); border-radius: 4px; padding: 12px 16px; margin-bottom: 12px;
+          display: flex; gap: 12px; align-items: flex-start; }
+  .page { display: none; }
+  .page.on { display: block; }
+</style>
+</head>
+<body>
+<div class="window" id="win">
+  <div class="backdrop"></div>
+  <div class="nav">
+    <div class="account">
+      <div class="phone"></div>
+      <div>
+        <div class="name" id="name">Your phone</div>
+        <div class="caption status-row" id="meta"></div>
+      </div>
+    </div>
+    <div class="item" data-page="home"><i class="i" style="--i:url(icons/home_20_regular.svg)"></i>Home</div>
+    <div class="item" data-page="microphone"><i class="i" style="--i:url(icons/mic_20_regular.svg)"></i>Microphone</div>
+    <div class="item" data-page="audio"><i class="i" style="--i:url(icons/speaker_2_20_regular.svg)"></i>Phone audio</div>
+    <div class="item" data-page="auto"><i class="i" style="--i:url(icons/flow_20_regular.svg)"></i>Smart auto</div>
+    <div class="item" data-page="connection"><i class="i" style="--i:url(icons/plug_connected_20_regular.svg)"></i>Connection</div>
+    <div class="item" data-page="about"><i class="i" style="--i:url(icons/info_20_regular.svg)"></i>About</div>
+  </div>
+
+  <div class="content" id="content">
+    <section class="page" id="p-home">
+      <h1>Home</h1>
+      <div class="card click" data-page="microphone">
+        <i class="i" style="--i:url(icons/mic_20_regular.svg)"></i>
+        <div class="body">Microphone<div class="sub" id="home-mic"></div></div>
+        <div class="right"><select class="combo" data-setting="mic_mode">
+          <option value="auto">Automatic</option><option value="phone">Phone mic</option><option value="laptop">Laptop mic</option></select></div>
+      </div>
+      <div class="card click" data-page="audio">
+        <i class="i" style="--i:url(icons/speaker_2_20_regular.svg)"></i>
+        <div class="body">Phone audio<div class="sub" id="home-audio"></div></div>
+        <div class="right"><select class="combo" data-setting="audio_mode">
+          <option value="auto">Automatic</option><option value="phone">On the phone</option><option value="laptop">On the laptop</option></select></div>
+      </div>
+      <div class="card click" data-page="connection">
+        <i class="i" style="--i:url(icons/plug_connected_20_regular.svg)"></i>
+        <div class="body">Connection<div class="sub" id="home-conn"></div></div>
+        <div class="right"><span class="num" id="home-ping"></span><i class="i i16" style="--i:url(icons/chevron_right_16_regular.svg)"></i></div>
+      </div>
+
+      <h2>What Smart auto did today</h2>
+      <div class="log">
+        <div class="hd">
+          <i class="i" style="--i:url(icons/flow_20_regular.svg)"></i>
+          <div class="body">Decisions<div class="sub">If one was wrong, say so and it will do the other thing next time</div></div>
+        </div>
+        <div id="log"></div>
+      </div>
+    </section>
+
+    <section class="page" id="p-microphone">
+      <h1>Microphone</h1>
+      <div class="card">
+        <i class="i" style="--i:url(icons/mic_20_regular.svg)"></i>
+        <div class="body">Which mic apps hear<div class="sub">Automatic uses the phone, and the laptop mic whenever the phone can't be reached</div></div>
+        <div class="right"><select class="combo" data-setting="mic_mode">
+          <option value="auto">Automatic</option><option value="phone">Phone mic</option><option value="laptop">Laptop mic</option></select></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/person_voice_20_regular.svg)"></i>
+        <div class="body">Voice cleaning<div class="sub">Background noise is removed on the phone before the sound leaves it</div></div>
+        <div class="right">On</div>
+      </div>
+      <div class="info">
+        <i class="i" style="--i:url(icons/info_20_regular.svg)"></i>
+        <div class="sub">In Discord and games, choose <b>CABLE Output</b> as the microphone. You only do this once; TRUE Phone Link decides what that mic hears.</div>
+      </div>
+    </section>
+
+    <section class="page" id="p-audio">
+      <h1>Phone audio</h1>
+      <div class="card">
+        <i class="i" style="--i:url(icons/speaker_2_20_regular.svg)"></i>
+        <div class="body">Where phone audio plays<div class="sub" id="audio-where"></div></div>
+        <div class="right"><select class="combo" data-setting="audio_mode">
+          <option value="auto">Automatic</option><option value="phone">On the phone</option><option value="laptop">On the laptop</option></select></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/phone_20_regular.svg)"></i>
+        <div class="body">Hand back to the phone now<div class="sub">Stops playing on the laptop and carries on from the phone's speaker</div></div>
+        <div class="right"><div class="btn" data-act="hand_back">Hand back</div></div>
+      </div>
+    </section>
+
+    <section class="page" id="p-auto">
+      <h1>Smart auto</h1>
+      <div class="card">
+        <i class="i" style="--i:url(icons/flow_20_regular.svg)"></i>
+        <div class="body">Smart auto<div class="sub">Moves phone audio to the laptop when the laptop is quiet, hands it back when you play something, and pauses it while you talk</div></div>
+        <div class="right"><span id="auto-state"></span><div class="switch" id="auto-switch" data-act="toggle_auto"></div></div>
+      </div>
+      <h2>What it has learned</h2>
+      <div class="log"><div id="rules"></div></div>
+    </section>
+
+    <section class="page" id="p-connection">
+      <h1>Connection</h1>
+      <div id="conn-info"></div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/wifi_1_20_regular.svg)"></i>
+        <div class="body">Mic and controls<div class="sub" id="conn-link"></div></div>
+        <div class="right num" id="conn-ping"></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/bluetooth_20_regular.svg)"></i>
+        <div class="body">Phone audio<div class="sub" id="conn-bt"></div></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/gauge_20_regular.svg)"></i>
+        <div class="body">Mic delay<div class="sub">From the phone's mic to the apps on this laptop</div></div>
+        <div class="right num" id="conn-delay"></div>
+      </div>
+    </section>
+
+    <section class="page" id="p-about">
+      <h1>About</h1>
+      <div class="card">
+        <i class="i" style="--i:url(icons/info_20_regular.svg)"></i>
+        <div class="body">TRUE Phone Link<div class="sub" id="about-ver"></div></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/settings_20_regular.svg)"></i>
+        <div class="body">Start with Windows<div class="sub">Runs quietly in the system tray</div></div>
+        <div class="right"><div class="switch" id="autostart" data-act="toggle_autostart"></div></div>
+      </div>
+      <div class="info"><div class="sub">Open source under the Apache 2.0 licence. Phone server approach after scrcpy (Apache 2.0); voice cleaning by DeepFilterNet 3 (MIT/Apache 2.0); icons from Fluent UI System Icons (MIT).</div></div>
+    </section>
+  </div>
+</div>
+<script src="common.js"></script>
+<script src="window.js"></script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+// The main window: a Settings-style page per area.
+let page = new URLSearchParams(location.search).get("page") || "home";
+
+function show(p) {
+  page = p;
+  document.querySelectorAll(".item").forEach((el) => el.classList.toggle("sel", el.dataset.page === p));
+  document.querySelectorAll(".page").forEach((el) => el.classList.toggle("on", el.id === "p-" + p));
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest("select")) return;
+  const nav = e.target.closest("[data-page]");
+  if (nav) show(nav.dataset.page);
+});
+document.addEventListener("change", (e) => {
+  const s = e.target.closest("[data-setting]");
+  if (s) invoke("act", { action: s.dataset.setting, arg: s.value });
+});
+listen("page", show);
+show(page);
+
+const KIND_ICON = { mic: "mic_20_regular", speaker: "speaker_2_20_regular", phone: "phone_20_regular", game: "games_20_regular", pause: "person_voice_20_regular" };
+
+start((s) => {
+  $("win").classList.toggle("off", !s.connected);
+  $("name").textContent = s.device.name || "Your phone";
+  $("meta").innerHTML = s.connected
+    ? `${icon("checkmark_circle_16_filled", "i16 ok")}Connected ${icon(s.link_kind === "bluetooth" ? "bluetooth_20_regular" : "wifi_1_20_regular", "i16")}` +
+      (s.battery != null ? `${icon("battery_7_20_regular", "i16")}<span class="num">${s.battery}%</span>` : "")
+    : esc(s.hint);
+
+  document.querySelectorAll('[data-setting="mic_mode"]').forEach((el) => (el.value = s.mic.mode));
+  document.querySelectorAll('[data-setting="audio_mode"]').forEach((el) => (el.value = s.audio.mode));
+
+  const micLine = s.mic.live === "off" ? "Nobody is using the mic" :
+    `${s.mic.live === "phone" ? "Phone mic, cleaned on the phone" : "Laptop mic"}${s.mic.app ? " · " + esc(s.mic.app) + " is listening" : ""}`;
+  $("home-mic").innerHTML = micLine;
+  const audioLine = s.audio.playing
+    ? `${esc(s.audio.playing)} is playing ${s.audio.on_speaker ? "on " + esc(s.audio.speaker) : "on the phone"}`
+    : s.audio.on_speaker ? `Connected to ${esc(s.audio.speaker)}` : "Nothing playing";
+  $("home-audio").innerHTML = audioLine;
+  $("audio-where").innerHTML = `Automatic plays it on ${esc(s.audio.speaker || "the laptop")} while the laptop is quiet`;
+  $("home-conn").textContent = s.connected ? s.link_text : s.hint;
+  $("home-ping").textContent = s.connected && s.ping_ms != null ? `${s.ping_ms} ms` : "";
+
+  $("log").innerHTML = s.decisions.length
+    ? s.decisions.slice().reverse().map((d) =>
+        `<div class="entry"><span class="t num">${clock(d.at)}</span>${icon(KIND_ICON[d.icon] || "flow_20_regular", "i16")}` +
+        `<div>${esc(d.text)}<div class="why">${esc(d.reason)}</div></div>` +
+        `<div><span class="link" data-act="thats_wrong" data-arg="${d.id}">${d.icon === "game" ? "Change" : "That's wrong"}</span></div></div>`).join("")
+    : `<div class="empty">Nothing yet today.</div>`;
+
+  $("auto-switch").classList.toggle("on", s.smart_auto);
+  $("auto-state").textContent = s.smart_auto ? "On" : "Off";
+  $("rules").innerHTML = s.rules.length
+    ? s.rules.map((r) => `<div class="entry" style="grid-template-columns: 20px 1fr auto">${icon(r.icon === "game" ? "games_20_regular" : "flow_20_regular", "i16")}` +
+        `<div>${esc(r.text)}</div><div><span class="link" data-act="forget_rule" data-arg="${esc(r.key)}">Forget</span></div></div>`).join("")
+    : `<div class="empty">Nothing yet. When you correct it, or answer a question about a game, it remembers here.</div>`;
+
+  $("conn-info").innerHTML = s.connected ? "" :
+    `<div class="info">${icon("info_20_regular")}<div class="sub">${esc(s.hint_long)}</div></div>`;
+  $("conn-link").textContent = s.connected ? s.link_text : "Not connected";
+  $("conn-ping").textContent = s.ping_ms != null ? `${s.ping_ms} ms` : "";
+  $("conn-bt").textContent = s.audio.available ? `Bluetooth, to ${s.audio.speaker}` : "Bluetooth audio isn't available (is the phone paired with this laptop?)";
+  $("conn-delay").textContent = s.mic.live === "phone" ? `${s.mic.delay_ms} ms` : "—";
+  $("about-ver").textContent = `Version ${s.version}`;
+  $("autostart").classList.toggle("on", s.autostart);
+});

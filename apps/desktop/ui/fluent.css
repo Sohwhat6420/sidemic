@@ -1,0 +1,50 @@
+/* Windows 11 dark-theme tokens, taken from WinUI 3's dark resources, so the app reads as part of Windows. */
+:root {
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", sans-serif;
+  --text: #ffffff;
+  --text-2: #c5c5c5;      /* TextFillColorSecondary */
+  --text-3: #9d9d9d;      /* TextFillColorTertiary */
+  --accent: #4cc2ff;      /* default blue, dark theme (AccentFillColorDefault) */
+  --accent-text: #99ebff;
+  --on-accent: #000000;
+  --mica: #202020;
+  --layer: #272727;
+  --card: #2b2b2b;
+  --card-border: rgba(0, 0, 0, 0.10);
+  --stroke: rgba(255, 255, 255, 0.0698);
+  --control: rgba(255, 255, 255, 0.0605);
+  --control-hover: rgba(255, 255, 255, 0.0837);
+  --control-border: rgba(255, 255, 255, 0.093);
+  --subtle-hover: rgba(255, 255, 255, 0.0605);
+  --divider: rgba(255, 255, 255, 0.0837);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 20px; color: var(--text); -webkit-font-smoothing: antialiased; }
+
+/* Icons: Fluent UI System Icons (MIT) drawn in currentColor through a mask. */
+.i { display: inline-block; width: 20px; height: 20px; flex: none; background: currentColor;
+     -webkit-mask: var(--i) center / contain no-repeat; }
+.i16 { width: 16px; height: 16px; }
+
+.caption { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* Toggle switch (WinUI ToggleSwitch). */
+.switch { width: 40px; height: 20px; border-radius: 10px; position: relative; flex: none;
+          border: 1px solid rgba(255,255,255,0.6); }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px;
+                 border-radius: 50%; background: rgba(255,255,255,0.8); }
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on::after { left: 23px; background: var(--on-accent); }
+
+/* ComboBox. */
+.combo { display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 132px;
+         height: 32px; padding: 0 10px 0 11px; border-radius: 4px; background: var(--control);
+         border: 1px solid var(--control-border); border-bottom-color: rgba(255,255,255,0.03); }
+
+/* Hyperlink-style button. */
+.link { color: var(--accent-text); font-size: 14px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 4px;
+       background: var(--control); border: 1px solid var(--control-border); }
