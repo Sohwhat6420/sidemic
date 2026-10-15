@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/voice", "crates/voice-bench", "crates/voice-jni"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Sohwhat6420/true-phone-link"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -11,7 +11,7 @@ package com.truephonelink.server;
  *
  * Mono float in [-1, 1] at 48 kHz. Not thread-safe; one instance per stream.
  */
-final class Dsp {
+final class Dsp implements VoiceChain {
 
     static final class Params {
         float sampleRate = 48000f;
@@ -23,7 +23,7 @@ final class Dsp {
         float minGainDb = -12f;    // how far a loud voice may be pulled down
         float gateDb = -50f;       // below this (after the current gain is removed) it is "not speech"
         float expandDb = -8f;      // extra cut between words, so the noise floor is not lifted with the voice
-        float ceilingDb = -1f;     // the limiter's ceiling; nothing leaves above it
+        float ceilingDb = -1.5f;   // the limiter's ceiling; leaves room for codec/inter-sample overshoot
         float riseDbPerSec = 6f;   // the leveller lifts slowly (no pumping) ...
         float fallDbPerSec = 60f;  // ... and pulls down quickly (the limiter catches the first transient)
     }
@@ -40,7 +40,15 @@ final class Dsp {
     private int holdSamples;
     private int holdRemaining;
 
-    // Limiter state.
+    // Limiter state: per-sample required gain -> sliding minimum over the look-ahead -> release ->
+    // box average over the look-ahead, against audio delayed by (look-ahead - 1). The average reaches the
+    // required gain exactly when the peak leaves the delay line, and ramps there smoothly (no gain step, so
+    // no inter-sample overshoot: the 15 Oct A/B measured +1.4 dBTP with the old step limiter).
+    private final int look;
+    private final float[] required;
+    private final float[] smoothed;
+    private double smoothedSum;
+    private int histPos;
     private final float[] delay;
     private int delayPos;
     private final float ceiling;
@@ -58,13 +66,29 @@ final class Dsp {
         presence = Biquad.peaking(p.sampleRate, p.presenceHz, 1.0f, p.presenceDb);
         envCoef = (float) Math.exp(-1.0 / (0.050 * p.sampleRate)); // ~50 ms RMS window
         holdSamples = (int) (0.200f * p.sampleRate);               // keep word tails for 200 ms
-        delay = new float[(int) (0.0015f * p.sampleRate)];          // 72 samples at 48 kHz
+        look = (int) (0.002f * p.sampleRate);                       // 96 samples at 48 kHz
+        required = new float[look];
+        smoothed = new float[look];
+        java.util.Arrays.fill(required, 1f);
+        java.util.Arrays.fill(smoothed, 1f);
+        smoothedSum = look;
+        delay = new float[look - 1];
         ceiling = dbToLin(p.ceilingDb);
         limitReleaseCoef = 1f - (float) Math.exp(-1.0 / (0.050 * p.sampleRate));
     }
 
+    @Override
+    public String describe() {
+        return "java: leveller + limiter, no noise suppression";
+    }
+
+    @Override
+    public void close() {
+    }
+
     /** Processes {@code n} samples in place. Call with ~10 ms blocks; the leveller's target is set per block. */
-    void process(float[] buf, int n) {
+    @Override
+    public void process(float[] buf, int n) {
         // 1. Filters, and the RMS envelope of the filtered input.
         double sumSq = 0;
         for (int i = 0; i < n; i++) {
@@ -108,28 +132,27 @@ final class Dsp {
             float g = dbToLin(startGain + (gainDb - startGain) * t + startExpand + (expandGainDb - startExpand) * t);
             float x = buf[i] * g;
 
-            // Look-ahead: the sample entering the delay line sets the gain before it reaches the output.
+            float ax = Math.abs(x);
+            required[histPos] = ax > ceiling ? ceiling / ax : 1f;
+            float hold = 1f;
+            for (float r : required) {
+                if (r < hold) {
+                    hold = r;
+                }
+            }
+            limitGain = hold < limitGain ? hold : limitGain + (hold - limitGain) * limitReleaseCoef;
+            smoothedSum += limitGain - smoothed[histPos];
+            smoothed[histPos] = limitGain;
+            histPos = (histPos + 1) % look;
+            float g2 = (float) (smoothedSum / look);
+            if (g2 < minLimit) {
+                minLimit = g2;
+            }
+
             float out = delay[delayPos];
             delay[delayPos] = x;
             delayPos = (delayPos + 1) % delay.length;
-
-            float peak = 0f;
-            for (float v : delay) {
-                float a = Math.abs(v);
-                if (a > peak) {
-                    peak = a;
-                }
-            }
-            float target = peak > ceiling ? ceiling / peak : 1f;
-            if (target < limitGain) {
-                limitGain = target;
-            } else {
-                limitGain += (target - limitGain) * limitReleaseCoef;
-            }
-            if (limitGain < minLimit) {
-                minLimit = limitGain;
-            }
-            float y = out * limitGain;
+            float y = out * g2;
             buf[i] = y > 1f ? 1f : (y < -1f ? -1f : y);
         }
         lastGainDb = gainDb + expandGainDb;

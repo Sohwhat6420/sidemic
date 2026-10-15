@@ -27,7 +27,8 @@ import java.util.Map;
  *
  * Common keys: source=voice-recognition|camcorder|unprocessed|mic|voice-communication|voice-performance
  *              channels=1|2  mix=avg|left|right  ns|agc|aec=on|off|default  dsp=1|0  debug=1
- *              target=-20 maxgain=24 gate=-50 expand=-8 ceiling=-1 presence=3
+ *              engine=native|java  denoise=dfn|rnnoise|none  atten=35  lib=/data/local/tmp/tpl/libtpl_voice_jni.so
+ *              target=-20 maxgain=24 gate=-50 expand=0 (native) / -8 (java) ceiling=-1.5 presence=3
  */
 public final class Main {
 
@@ -78,15 +79,34 @@ public final class Main {
                 tri(o.get("ns")), tri(o.get("agc")), tri(o.get("aec")));
     }
 
-    private static Dsp dsp(Map<String, String> o) {
+    /**
+     * The voice chain: native (Rust; DeepFilterNet 3 capped at 35 dB by default, the 15 Oct 2026 benchmark's
+     * winner) when the library loads, else the Java chain (leveller + limiter only), so the mic always works.
+     */
+    private static VoiceChain chain(Map<String, String> o) {
+        float target = Float.parseFloat(get(o, "target", "-20"));
+        float maxGain = Float.parseFloat(get(o, "maxgain", "24"));
+        float ceiling = Float.parseFloat(get(o, "ceiling", "-1.5"));
+        float presence = Float.parseFloat(get(o, "presence", "3"));
+        if (!"java".equals(get(o, "engine", "native")) && NativeVoice.load(get(o, "lib", NativeVoice.DEFAULT_LIB))) {
+            String denoise = get(o, "denoise", "dfn");
+            int kind = "dfn".equals(denoise) ? 2 : "rnnoise".equals(denoise) ? 1 : 0;
+            float expand = Float.parseFloat(get(o, "expand", kind == 0 ? "-8" : "0"));
+            VoiceChain c = new NativeVoice(kind, Float.parseFloat(get(o, "atten", "35")), target, maxGain, expand,
+                    ceiling, presence);
+            Log.i("voice chain: " + c.describe());
+            return c;
+        }
         Dsp.Params p = new Dsp.Params();
-        p.targetDb = Float.parseFloat(get(o, "target", "-20"));
-        p.maxGainDb = Float.parseFloat(get(o, "maxgain", "24"));
+        p.targetDb = target;
+        p.maxGainDb = maxGain;
         p.gateDb = Float.parseFloat(get(o, "gate", "-50"));
         p.expandDb = Float.parseFloat(get(o, "expand", "-8"));
-        p.ceilingDb = Float.parseFloat(get(o, "ceiling", "-1"));
-        p.presenceDb = Float.parseFloat(get(o, "presence", "3"));
-        return new Dsp(p);
+        p.ceilingDb = ceiling;
+        p.presenceDb = presence;
+        VoiceChain c = new Dsp(p);
+        Log.i("voice chain: " + c.describe());
+        return c;
     }
 
     /** Interleaved 16-bit frames to mono float, per the mix rule. */
@@ -121,7 +141,7 @@ public final class Main {
 
         MicCapture cap = open(o);
         int ch = cap.channels;
-        Dsp dsp = useDsp ? dsp(o) : null;
+        VoiceChain dsp = useDsp ? chain(o) : null;
         Stats raw = new Stats(ch);
         Stats processed = new Stats(1);
         short[] buf = new short[BLOCK_FRAMES * ch];
@@ -133,6 +153,7 @@ public final class Main {
         cap.start();
         long total = (long) secs * MicCapture.SAMPLE_RATE;
         long done = 0;
+        long dspNanos = 0;
         try {
             while (done < total) {
                 int n = cap.read(buf, buf.length);
@@ -144,7 +165,9 @@ public final class Main {
                 raw.add(buf, frames);
                 if (dsp != null) {
                     toMono(buf, frames, ch, mix, mono);
+                    long t = System.nanoTime();
                     dsp.process(mono, frames);
+                    dspNanos += System.nanoTime() - t;
                     toShorts(mono, frames, monoOut);
                     dspWav.write(monoOut, frames);
                     processed.add(monoOut, frames);
@@ -153,6 +176,9 @@ public final class Main {
             }
         } finally {
             cap.release();
+            if (dsp != null) {
+                dsp.close();
+            }
             rawWav.close();
             if (dspWav != null) {
                 dspWav.close();
@@ -161,6 +187,7 @@ public final class Main {
         Log.i("raw: " + raw.summary());
         if (dsp != null) {
             Log.i("dsp: " + processed.summary());
+            Log.i(String.format("dsp CPU: %.1f%% of real time (%.2f ms per 10 ms block)", 100.0 * dspNanos / (done * 1e9 / MicCapture.SAMPLE_RATE), dspNanos / 1e6 / Math.max(1, done / BLOCK_FRAMES)));
         }
         Log.i("wrote " + out + "-raw.wav" + (dsp != null ? " and " + out + "-dsp.wav" : ""));
     }
@@ -175,10 +202,11 @@ public final class Main {
             long t0 = SystemClock.elapsedRealtime();
             Log.i("client connected; starting mic");
             MicCapture cap = null;
+            VoiceChain dsp = null;
             try {
                 cap = open(o);
                 int ch = cap.channels;
-                Dsp dsp = useDsp ? dsp(o) : null;
+                dsp = useDsp ? chain(o) : null;
                 cap.start();
                 OutputStream os = client.getOutputStream();
                 short[] buf = new short[BLOCK_FRAMES * ch];
@@ -207,9 +235,9 @@ public final class Main {
                         bytes[2 * i + 1] = (byte) (monoOut[i] >> 8);
                     }
                     os.write(bytes, 0, frames * 2);
-                    if (dsp != null && Log.debug && ++blocks % 100 == 0) {
-                        Log.d(String.format("in %.1f dB, gain %.1f dB, limiter %.1f dB", dsp.lastInputDb, dsp.lastGainDb,
-                                dsp.lastLimitDb));
+                    if (dsp instanceof Dsp && Log.debug && ++blocks % 100 == 0) {
+                        Log.d(String.format("in %.1f dB, gain %.1f dB, limiter %.1f dB", ((Dsp) dsp).lastInputDb, ((Dsp) dsp).lastGainDb,
+                                ((Dsp) dsp).lastLimitDb));
                     }
                 }
             } catch (IOException e) {
@@ -217,6 +245,9 @@ public final class Main {
             } finally {
                 if (cap != null) {
                     cap.release();
+                }
+                if (dsp != null) {
+                    dsp.close();
                 }
                 try {
                     client.close();

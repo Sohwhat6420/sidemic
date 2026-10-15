@@ -1,0 +1,25 @@
+[package]
+name = "tpl-voice"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "TRUE Phone Link voice chain: high-pass, noise suppression, presence, speech leveller, look-ahead limiter"
+
+[lib]
+name = "tpl_voice"
+
+[features]
+default = ["rnnoise", "dfn"]
+rnnoise = ["dep:nnnoiseless"]
+dfn = ["dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-onnx", "dep:tract-pulse", "dep:tract-hir"]
+
+[dependencies]
+nnnoiseless = { version = "0.5", optional = true, default-features = false }
+# DeepFilterNet 3 (MIT/Apache-2.0). crates.io only has a 2022 release without the DFN3 model, so pin the repo.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", optional = true, default-features = false, features = ["tract", "default-model"] }
+ndarray = { version = "0.15", optional = true }
+# Pinned to upstream's lockfile: newer tract moved to ndarray 0.16 and changed APIs libDF still uses.
+tract-core = { version = "=0.21.4", optional = true }
+tract-onnx = { version = "=0.21.4", optional = true }
+tract-pulse = { version = "=0.21.4", optional = true }
+tract-hir = { version = "=0.21.4", optional = true }
