@@ -1,0 +1,8 @@
+TRUE Phone Link
+Copyright 2026 Ethan (TRUE Phone Link contributors)
+
+This product includes software derived from scrcpy (https://github.com/Genymobile/scrcpy),
+licensed under the Apache License, Version 2.0:
+  Copyright (C) 2018 Genymobile
+  Copyright (C) 2018-2026 Romain Vimont
+Derived files say so in their headers (phone-server: FakeContext.java, Workarounds.java).
