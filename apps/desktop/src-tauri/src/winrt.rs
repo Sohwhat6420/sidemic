@@ -89,6 +89,50 @@ impl A2dp {
     }
 }
 
+/// Which Bluetooth audio sources are paired and usable, kept current by Windows' device watcher. It replaced a
+/// full device search every 10 s, which cost 63 ms of CPU and leaked 2.6 KB each time (measured with
+/// `--probe bt-scan`); the watcher costs nothing until a device comes or goes.
+pub struct BtWatch {
+    watcher: windows::Devices::Enumeration::DeviceWatcher,
+    ids: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl BtWatch {
+    pub fn start() -> Result<BtWatch> {
+        use windows::Devices::Enumeration::{DeviceInformationUpdate, DeviceWatcher};
+        let watcher = DeviceInformation::CreateWatcherAqsFilter(&AudioPlaybackConnection::GetDeviceSelector()?)?;
+        let ids = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let added = ids.clone();
+        watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, d| {
+            if let Ok(d) = d.ok() {
+                added.lock().unwrap().insert(d.Id()?.to_string());
+            }
+            Ok(())
+        }))?;
+        let removed = ids.clone();
+        watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, u| {
+            if let Ok(u) = u.ok() {
+                removed.lock().unwrap().remove(&u.Id()?.to_string());
+            }
+            Ok(())
+        }))?;
+        // Windows only reports additions and removals to a watcher that also takes updates.
+        watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(|_, _| Ok(())))?;
+        watcher.Start()?;
+        Ok(BtWatch { watcher, ids })
+    }
+
+    pub fn any(&self) -> bool {
+        !self.ids.lock().unwrap().is_empty()
+    }
+}
+
+impl Drop for BtWatch {
+    fn drop(&mut self) {
+        let _ = self.watcher.Stop();
+    }
+}
+
 /// Media sessions the laptop is playing right now, as (app id, title). Includes Chrome tabs (YouTube) because
 /// Chrome publishes its media to Windows.
 pub fn laptop_media() -> Result<Vec<(String, String)>> {
@@ -108,6 +152,37 @@ pub fn laptop_media() -> Result<Vec<(String, String)>> {
         }
     }
     Ok(playing)
+}
+
+/// The watcher's media check, once a second. `MediaManager::RequestAsync` each time cost 9 ms and leaked about
+/// 2.8 KB per call (≈200 MB a day, measured with `--probe media`), so the manager is requested once and kept;
+/// titles aren't fetched here because the watcher only needs which apps are playing.
+#[derive(Default)]
+pub struct MediaWatch {
+    mgr: Option<MediaManager>,
+}
+
+impl MediaWatch {
+    /// App ids of the media sessions playing right now.
+    pub fn playing(&mut self) -> Vec<String> {
+        if self.mgr.is_none() {
+            self.mgr = MediaManager::RequestAsync().and_then(|a| a.join()).ok();
+        }
+        let Some(mgr) = &self.mgr else { return Vec::new() };
+        let read = || -> Result<Vec<String>> {
+            let mut out = Vec::new();
+            for s in mgr.GetSessions()? {
+                if s.GetPlaybackInfo()?.PlaybackStatus()? == PlaybackStatus::Playing {
+                    out.push(s.SourceAppUserModelId()?.to_string());
+                }
+            }
+            Ok(out)
+        };
+        read().unwrap_or_else(|_| {
+            self.mgr = None; // ask again next time
+            Vec::new()
+        })
+    }
 }
 
 /// The Windows accent palette as CSS hex colours: [light3, light2, light1, accent, dark1, dark2, dark3], and

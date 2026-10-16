@@ -8,10 +8,12 @@ mod core;
 mod log;
 mod mic;
 mod phone;
+mod probe;
 mod wasapi;
 mod winrt;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,9 +31,30 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 const FLYOUT_WIDTH: f64 = 360.0;
 const AUTOSTART_ARG: &str = "--autostart";
 
+/// WebView2's arguments for both windows (they share one browser process, so they must match): wry's defaults
+/// plus no GPU process. The GPU process held 76 MB at start and about 200 MB after a day for two small, mostly
+/// hidden pages; software drawing renders them the same (checked 16 Oct).
+const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu";
+
+/// The flyout is unloaded once it has been closed this long (Ethan's choice, 16 Oct): with no page open,
+/// WebView2's six processes exit and the app idles at about 12 MB instead of about 106 MB. Opening it again
+/// after that takes about half a second.
+const FLYOUT_UNLOAD_AFTER: Duration = Duration::from_secs(120);
+
 /// When the flyout last hid itself on losing focus. A tray click also takes focus away, so a click that lands
 /// just after that hide means "close", not "open again".
 static LAST_HIDE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// When the flyout was last shown or hidden, for unloading it.
+static LAST_USED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Set while a freshly loaded flyout waits for its first drawn frame; `flyout_height` then shows it, so it never
+/// appears blank.
+static SHOW_WHEN_READY: AtomicBool = AtomicBool::new(false);
+
+fn touch_flyout() {
+    *LAST_USED.lock().unwrap() = Some(Instant::now());
+}
 
 #[tauri::command]
 fn state(h: tauri::State<core::Handle>) -> Value {
@@ -59,14 +82,25 @@ async fn open_window(app: AppHandle, page: String) {
 fn hide_flyout(app: AppHandle) {
     if let Some(w) = app.get_webview_window("flyout") {
         let _ = w.hide();
+        touch_flyout();
     }
 }
 
 #[tauri::command]
 fn flyout_height(app: AppHandle, height: f64) {
     if let Some(w) = app.get_webview_window("flyout") {
-        let _ = w.set_size(LogicalSize::new(FLYOUT_WIDTH, height.ceil()));
+        let size = LogicalSize::new(FLYOUT_WIDTH, height.ceil());
+        let _ = w.set_size(size);
         place_flyout(&w);
+        if SHOW_WHEN_READY.swap(false, Ordering::SeqCst) {
+            // A borderless window sized before it was ever shown comes out about 30 px too tall, and the page
+            // only reports its height again when the state changes, so size it once more now it is on screen.
+            let _ = w.show();
+            let _ = w.set_size(size);
+            place_flyout(&w);
+            let _ = w.set_focus();
+            touch_flyout();
+        }
     }
 }
 
@@ -81,6 +115,7 @@ fn accent_json() -> Value {
 fn show_main(app: &AppHandle, page: &str) {
     if let Some(f) = app.get_webview_window("flyout") {
         let _ = f.hide();
+        touch_flyout();
     }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -97,6 +132,7 @@ fn show_main(app: &AppHandle, page: &str) {
         .transparent(true)
         .theme(Some(Theme::Dark))
         .effects(EffectsBuilder::new().effect(Effect::Mica).build())
+        .additional_browser_args(WEBVIEW_ARGS)
         .center()
         .build();
     if let Err(e) = built {
@@ -119,7 +155,9 @@ fn build_flyout(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible(false)
         .theme(Some(Theme::Dark))
         .effects(EffectsBuilder::new().effect(Effect::Acrylic).build())
+        .additional_browser_args(WEBVIEW_ARGS)
         .build()?;
+    touch_flyout();
     round_corners(&w);
     // The flyout only exists while it has focus. If it is ever up without focus (Windows refused the focus, or
     // something showed it), it goes away within half a second instead of sitting on the screen.
@@ -128,11 +166,15 @@ fn build_flyout(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let hwnd = h.0 as isize;
         std::thread::spawn(move || {
             use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible, ShowWindow, SW_HIDE};
+            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, IsWindowVisible, ShowWindow, SW_HIDE};
             let hwnd = HWND(hwnd as _);
             let mut unfocused = 0;
             loop {
                 std::thread::sleep(Duration::from_millis(150));
+                // The flyout was unloaded: this watchdog goes with it (a new one starts with the next flyout).
+                if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                    return;
+                }
                 let (visible, focused) = unsafe { (IsWindowVisible(hwnd).as_bool(), GetForegroundWindow() == hwnd) };
                 if visible && !focused {
                     unfocused += 1;
@@ -140,6 +182,7 @@ fn build_flyout(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
+                        touch_flyout();
                         unfocused = 0;
                     }
                 } else {
@@ -154,6 +197,7 @@ fn build_flyout(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             if os_visible(&me) {
                 let _ = me.hide();
                 *LAST_HIDE.lock().unwrap() = Some(Instant::now());
+                touch_flyout();
             }
         }
     });
@@ -196,9 +240,21 @@ fn place_flyout(w: &WebviewWindow) {
 }
 
 fn toggle_flyout(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("flyout") else { return };
+    let Some(w) = app.get_webview_window("flyout") else {
+        // Not loaded (unloaded after a while closed, or never opened yet): load it; it shows once drawn.
+        SHOW_WHEN_READY.store(true, Ordering::SeqCst);
+        if let Err(e) = build_flyout(app) {
+            SHOW_WHEN_READY.store(false, Ordering::SeqCst);
+            log::line(format!("flyout: {e}"));
+        }
+        return;
+    };
+    if SHOW_WHEN_READY.load(Ordering::SeqCst) {
+        return; // still loading from the last click
+    }
     if os_visible(&w) {
         let _ = w.hide();
+        touch_flyout();
         return;
     }
     if LAST_HIDE.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
@@ -207,6 +263,22 @@ fn toggle_flyout(app: &AppHandle) {
     place_flyout(&w);
     let _ = w.show();
     let _ = w.set_focus();
+    touch_flyout();
+}
+
+/// Unloads the flyout once it has been closed for `FLYOUT_UNLOAD_AFTER`.
+fn unload_idle_flyout(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("tpl-unload".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(10));
+            let Some(w) = app.get_webview_window("flyout") else { continue };
+            let idle = LAST_USED.lock().unwrap().is_some_and(|t| t.elapsed() >= FLYOUT_UNLOAD_AFTER);
+            if idle && !os_visible(&w) && !SHOW_WHEN_READY.load(Ordering::SeqCst) {
+                let _ = w.destroy();
+            }
+        })
+        .expect("unload thread");
 }
 
 pub fn set_tray_tooltip(app: &AppHandle, text: &str) {
@@ -252,6 +324,22 @@ fn phone_dir(app: &AppHandle) -> PathBuf {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--probe") {
+        let part = args.get(2).map_or("tick", String::as_str);
+        let times = args.get(3).and_then(|n| n.parse().ok()).unwrap_or(2000);
+        if part == "all" {
+            probe::PARTS.iter().for_each(|p| probe::run(p, times));
+        } else {
+            probe::run(part, times);
+        }
+        return;
+    }
+    // Tauri's async runtime starts one worker per logical core (20 here) for a handful of async commands; two
+    // are plenty.
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
+    tauri::async_runtime::set(rt.handle().clone());
+    std::mem::forget(rt);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app, "home")))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
@@ -268,7 +356,8 @@ fn main() {
             ));
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));
 
-            build_flyout(&handle)?;
+            // The flyout loads on the first tray click, not at sign-in, and unloads when left closed.
+            unload_idle_flyout(handle.clone());
 
             let open = MenuItem::with_id(app, "open", "Open TRUE Phone Link", true, None::<&str>)?;
             let mark = MenuItem::with_id(app, "mark", "Mark a problem now", true, None::<&str>)?;

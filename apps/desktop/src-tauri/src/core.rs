@@ -18,7 +18,6 @@ use tauri::{AppHandle, Emitter};
 use tpl_policy::{
     friendly_name, Action, AudioMode, Config, DecisionKind, Engine, Event, Memory, MicMode, MicRoute, Placement, Situation,
 };
-use windows::Win32::Media::Audio::eCapture;
 
 use crate::adb::{Adb, DeviceState};
 use crate::mic::{self, MicStatus, Route};
@@ -756,6 +755,9 @@ enum A2dpCmd {
 fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
     wasapi::com_init();
     let mut link = winrt::A2dp::default();
+    let bt_watch = winrt::BtWatch::start().map_err(|e| log::line(format!("bluetooth device watcher didn't start: {e}"))).ok();
+    // Let the watcher report the devices that are already there before the first check.
+    thread::sleep(Duration::from_millis(500));
     let mut available = false;
     let mut next_scan = Instant::now();
     loop {
@@ -784,8 +786,12 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
             now_available = false;
             next_scan = Instant::now() + Duration::from_secs(5);
         } else if Instant::now() >= next_scan {
-            now_available = winrt::A2dp::devices().is_ok_and(|d| !d.is_empty());
-            next_scan = Instant::now() + Duration::from_secs(10);
+            now_available = match &bt_watch {
+                Some(w) => w.any(),
+                // No watcher (it failed to start): fall back to a full search once a minute.
+                None => winrt::A2dp::devices().is_ok_and(|d| !d.is_empty()),
+            };
+            next_scan = Instant::now() + Duration::from_secs(if bt_watch.is_some() { 2 } else { 60 });
         }
         if now_available != available || error.is_some() {
             available = now_available;
@@ -821,6 +827,26 @@ fn laptop_thread(tx: Sender<Msg>) {
     let mut n = 0u64;
     let debug = std::env::var_os("TPL_DEBUG").is_some();
     let mut last_debug = String::new();
+    let mut watch = wasapi::Watch::default();
+    // The media check gets its own thread: Windows' media service has been seen to stop answering for good
+    // (16 Oct), and that must only freeze media detection, never the mic and sound watchers.
+    let media_now: Arc<Mutex<(Vec<String>, Instant)>> = Arc::new(Mutex::new((Vec::new(), Instant::now())));
+    {
+        let media_now = media_now.clone();
+        thread::Builder::new()
+            .name("tpl-media".into())
+            .spawn(move || {
+                wasapi::com_init();
+                let mut media_watch = winrt::MediaWatch::default();
+                loop {
+                    let playing = media_watch.playing();
+                    *media_now.lock().unwrap() = (playing, Instant::now());
+                    thread::sleep(Duration::from_secs(1));
+                }
+            })
+            .unwrap();
+    }
+    let mut media_stuck_logged = false;
     loop {
         if debug && n % 4 == 0 {
             let rows = wasapi::default_render().and_then(|(d, _)| wasapi::session_debug(&d)).unwrap_or_default().join(", ");
@@ -831,25 +857,21 @@ fn laptop_thread(tx: Sender<Msg>) {
                 last_debug = line;
             }
         }
-        let now_mic = wasapi::find(eCapture, |n| n.contains("CABLE Output"))
-            .and_then(|(d, _)| wasapi::active_sessions(&d))
-            .map(|p| names(p, &[]))
-            .unwrap_or_default();
+        let now_mic = names(watch.mic_users(), &[]);
         diff(&mut mic_users, now_mic, &tx, |app_id, active| Event::MicInUse { active, app_id });
 
-        let now_sounds = wasapi::default_render()
-            .and_then(|(d, _)| wasapi::sounding_sessions(&d))
-            .map(|p| names(p, NOT_SOUNDS))
-            .unwrap_or_default();
+        let now_sounds = names(watch.sounding(), NOT_SOUNDS);
         diff(&mut sounds, now_sounds, &tx, |app_id, active| Event::LaptopSound { active, app_id });
 
         if n % 4 == 0 {
-            let now_media: BTreeSet<String> = winrt::laptop_media()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(app, _)| app)
-                .filter(|app| !app.to_lowercase().contains("bluetooth"))
-                .collect();
+            let (playing, at) = media_now.lock().unwrap().clone();
+            let stuck = at.elapsed() > Duration::from_secs(30);
+            if stuck != media_stuck_logged {
+                media_stuck_logged = stuck;
+                log::line(if stuck { "Windows' media service isn't answering; laptop media can't be seen until it does" } else { "Windows' media service is answering again" });
+            }
+            let now_media: BTreeSet<String> =
+                playing.into_iter().filter(|app| !app.to_lowercase().contains("bluetooth")).collect();
             diff(&mut media, now_media, &tx, |app_id, playing| Event::LaptopMedia { playing, app_id });
 
             let (exe, full) = winrt::foreground();

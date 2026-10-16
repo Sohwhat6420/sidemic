@@ -186,12 +186,66 @@ impl Drop for Capture {
     }
 }
 
+/// The watcher's view of the two endpoints it polls 4 times a second: CABLE Output (who is listening) and the
+/// default speaker (who is making sound). Looking the devices up each time cost ~1–2.5 ms per tick, so their
+/// session managers are kept and only looked up again every few seconds (the default speaker can change) or
+/// after an error.
+#[derive(Default)]
+pub struct Watch {
+    cable: Option<IAudioSessionManager2>,
+    speaker: Option<IAudioSessionManager2>,
+    looked_up: Option<std::time::Instant>,
+}
+
+impl Watch {
+    const RELOOK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn refresh(&mut self) {
+        if self.looked_up.is_some_and(|t| t.elapsed() < Self::RELOOK) {
+            return;
+        }
+        let mgr = |d: IMMDevice| -> Result<IAudioSessionManager2> { unsafe { d.Activate(CLSCTX_ALL, None) } };
+        self.cable = find(eCapture, |n| n.contains("CABLE Output")).and_then(|(d, _)| mgr(d)).ok();
+        self.speaker = default_render().and_then(|(d, _)| mgr(d)).ok();
+        self.looked_up = Some(std::time::Instant::now());
+    }
+
+    /// Process ids that have CABLE Output open right now.
+    pub fn mic_users(&mut self) -> Vec<u32> {
+        self.refresh();
+        let r = self.cable.as_ref().map(active_in);
+        self.settle(r)
+    }
+
+    /// Process ids making sound on the default speaker right now.
+    pub fn sounding(&mut self) -> Vec<u32> {
+        self.refresh();
+        let r = self.speaker.as_ref().map(sounding_in);
+        self.settle(r)
+    }
+
+    fn settle(&mut self, r: Option<Result<Vec<u32>>>) -> Vec<u32> {
+        match r {
+            Some(Ok(p)) => p,
+            // A device that went away fails here: look everything up again next time.
+            Some(Err(_)) => {
+                self.looked_up = None;
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
+    }
+}
+
 /// Process ids with an *active* audio session on this endpoint (a capture endpoint: who is listening;
 /// a render endpoint: who is making sound).
 pub fn active_sessions(d: &IMMDevice) -> Result<Vec<u32>> {
+    active_in(&unsafe { d.Activate(CLSCTX_ALL, None) }?)
+}
+
+fn active_in(mgr: &IAudioSessionManager2) -> Result<Vec<u32>> {
     let mut pids = Vec::new();
     unsafe {
-        let mgr: IAudioSessionManager2 = d.Activate(CLSCTX_ALL, None)?;
         let list = mgr.GetSessionEnumerator()?;
         for i in 0..list.GetCount()? {
             let s = list.GetSession(i)?;
@@ -210,9 +264,12 @@ pub fn active_sessions(d: &IMMDevice) -> Result<Vec<u32>> {
 /// Process ids whose session on this render endpoint is actually making sound right now (peak above about
 /// -50 dBFS). Plenty of apps keep a silent stream open all day, so "active" alone would duck the phone for ever.
 pub fn sounding_sessions(d: &IMMDevice) -> Result<Vec<u32>> {
+    sounding_in(&unsafe { d.Activate(CLSCTX_ALL, None) }?)
+}
+
+fn sounding_in(mgr: &IAudioSessionManager2) -> Result<Vec<u32>> {
     let mut pids = Vec::new();
     unsafe {
-        let mgr: IAudioSessionManager2 = d.Activate(CLSCTX_ALL, None)?;
         let list = mgr.GetSessionEnumerator()?;
         for i in 0..list.GetCount()? {
             let s = list.GetSession(i)?;

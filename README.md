@@ -19,5 +19,9 @@ adb push phone-server/out/tpl-server.jar /data/local/tmp/tpl/
 adb shell CLASSPATH=/data/local/tmp/tpl/tpl-server.jar app_process / com.truephonelink.server.Main mode=probe
 ```
 
+## Efficiency
+Idle in the tray it is one process using about 9 MB and 0.03% CPU; the popup's web view loads on click and unloads
+after 2 minutes. How that was measured and fixed (it started at ~800 MB and a busy core): `docs/efficiency.md`.
+
 ## Licence
 Apache-2.0. Parts of `phone-server` are derived from scrcpy (Apache-2.0); see `NOTICE`.

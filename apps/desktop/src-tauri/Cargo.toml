@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 tpl-policy = { path = "../../../crates/policy" }
 
 [dependencies.windows]
@@ -35,6 +36,7 @@ features = [
     "Win32_System_Variant",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
     "Win32_Devices_FunctionDiscovery",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
