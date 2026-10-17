@@ -149,7 +149,8 @@ flowchart LR
   pick.
 - **adb** on the PC, from Android platform-tools (`winget install Google.PlatformTools`) or
   [scrcpy](https://github.com/Genymobile/scrcpy) (`winget install Genymobile.scrcpy`); the app finds either.
-- **A 64-bit Android 12+ phone** with Developer options on. Tested on a Galaxy S24 Ultra (Android 16).
+- **A 64-bit Android 12+ phone** with Developer options on. Tested on a Galaxy S24 Ultra (Android 16) and a POCO
+  X6 Pro (HyperOS 2, Android 15); see [Phone compatibility](#phone-compatibility).
 - Phone and PC on the same **private** Wi-Fi.
 
 ### One-time phone setup
@@ -158,6 +159,31 @@ flowchart LR
 2. Turn on <kbd>Developer options</kbd> → <kbd>Wireless debugging</kbd>, and add its Quick Settings tile.
 3. Pair once with `adb pair` (Developer options shows the code), and tick **Always allow on this network**.
 4. Samsung phones: turn off **Auto Blocker**, and turn on **Disable adb authorisation timeout**.
+5. Xiaomi, Redmi and POCO phones: also turn on <kbd>Developer options</kbd> → **USB debugging (Security settings)**.
+   HyperOS may ask for a SIM card and a Mi account the first time you turn it on.
+6. OPPO, realme and OnePlus phones: turn on **Disable permission monitoring** in Developer options.
+
+#### Phone compatibility
+
+| Phone | Software | Mic | Phone audio on the PC | What's playing, play/pause | Switches it needs |
+| --- | --- | --- | --- | --- | --- |
+| Samsung Galaxy S24 Ultra | One UI 8, Android 16 | ✅ | ✅ | ✅ | Wireless debugging; Auto Blocker off; Disable adb authorisation timeout |
+| Xiaomi POCO X6 Pro 5G | HyperOS 2.0, Android 15 | ✅ screen on and off | not tested yet | ✅ (YouTube) | Wireless debugging; USB debugging (Security settings)¹ |
+| Other Xiaomi, Redmi, POCO | HyperOS / MIUI | likely, untested | likely | likely | as the POCO |
+| OPPO, realme, OnePlus | ColorOS / OxygenOS | untested | untested | untested | Wireless debugging; Disable permission monitoring² |
+| Pixel and other stock Android 12+ | Android 12+ | untested | untested | untested | Wireless debugging |
+
+¹ It was on for the POCO test; it wasn't tested off. If the phone refuses something, the app names this switch.
+² From those brands' documentation, not measured here. The app names it if the phone refuses something.
+
+Notes from the POCO test (17 Oct 2026):
+- **Screen off**: the phone's Wi-Fi power saving sends the mic in bursts about 190 ms apart. The app measures how
+  late the audio arrives and grows its buffer only as much as that needs (40 ms with the screen on, up to about
+  240 ms with it off), so there's no gap, at the cost of some delay while the screen is off.
+- **Wallpaper**: HyperOS doesn't let the PC read the wallpaper picture, so the app shows a gradient in its colours.
+- **Bluetooth name**: the phone reports it only while Bluetooth is on. If it isn't known, the app's Bluetooth hint
+  falls back to the phone's device name, then its model.
+- **YouTube Music and Spotify** weren't tested (they need a signed-in account).
 
 ### Then
 - Install and start TRUE Phone Link. It sits in the tray and starts with Windows.
@@ -183,6 +209,8 @@ flowchart LR
 | *Allow this laptop on your phone* | Accept the prompt on the phone and tick **Always allow on this network**. Mesh Wi-Fi asks once per access point. |
 | *adb isn't installed* | Install platform-tools or scrcpy (see [Requirements](#requirements)), or point `TPL_ADB` at `adb.exe`. |
 | *Couldn't start on the phone* | It retries by itself. If it keeps failing, the log says why. |
+| *The phone refused play/pause* (Connection page; also volume changes or reading what's playing) | Turn on the switch it names. On Xiaomi, Redmi and POCO that's **USB debugging (Security settings)**. |
+| *Also reachable over wireless debugging: Use this phone* (Connection page) | More than one phone has wireless debugging on. The app keeps the phone it used before; click **Use this phone** to switch. |
 | Your friends hear nothing | In Discord or the game, the input device must be **CABLE Output**, not your laptop mic. |
 
 The app writes a plain-text log per day to `%APPDATA%\com.truephonelink.desktop\logs\`. If something looks
