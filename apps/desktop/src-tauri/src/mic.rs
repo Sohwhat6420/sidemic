@@ -45,30 +45,36 @@ pub fn spawn(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>
 }
 
 const TARGET: usize = (RATE / 1000 * 40) as usize; // keep at least ~40 ms queued
-const MAX_TARGET: usize = (RATE / 1000 * 300) as usize; // never more than 300 ms, however bursty the Wi-Fi
+const MAX_TARGET: usize = (RATE / 1000 * 300) as usize; // never more than 300 ms, however late the Wi-Fi
 
-/// How much to keep queued so the gaps between arrivals never empty the cable: 40 ms on a smooth link, or the
-/// longest gap of the last few seconds plus 20 ms. Some phones batch Wi-Fi traffic while the screen is off (a
-/// POCO X6 Pro on HyperOS delivered its audio in 150–200 ms bursts, measured 17 Oct 2026), and a fixed 40 ms
-/// queue then plays silence between every burst. Grows at once on a long gap, shrinks after 5 s without one.
+/// How much to keep queued so late audio never empties the cable: 40 ms, plus how late the link has been in the
+/// last 5 s.
+///
+/// Lateness, not the gap between arrivals, is what drains the queue. Some phones batch Wi-Fi traffic while the
+/// screen is off (a POCO X6 Pro on HyperOS delivered its mic in ~190 ms bursts, measured 17 Oct 2026), but each
+/// burst carries the audio for its whole gap, so steady bursts need no extra queue; only a burst that comes later
+/// than the others does. So: just before each arrival, note audio received minus time elapsed (where the queue
+/// bottoms out), and keep the spread of those low points over the last 5 s on top of the 40 ms.
 #[derive(Default)]
 struct Jitter {
-    gaps: VecDeque<(Instant, usize)>,
-    last: Option<Instant>,
+    start: Option<Instant>,
+    received: i64,
+    lows: VecDeque<(Instant, i64)>,
 }
 
 impl Jitter {
-    fn arrived(&mut self, now: Instant) -> usize {
-        if let Some(last) = self.last {
-            let gap = ((now - last).as_micros() as usize * RATE as usize) / 1_000_000;
-            self.gaps.push_back((now, gap));
+    /// Records `samples` arriving at `now`; returns the queue to keep, in samples.
+    fn arrived(&mut self, now: Instant, samples: usize) -> usize {
+        let start = *self.start.get_or_insert(now);
+        let elapsed = ((now - start).as_micros() as i64 * RATE as i64) / 1_000_000;
+        self.lows.push_back((now, self.received - elapsed));
+        self.received += samples as i64;
+        while self.lows.front().is_some_and(|(t, _)| now - *t > Duration::from_secs(5)) {
+            self.lows.pop_front();
         }
-        self.last = Some(now);
-        while self.gaps.front().is_some_and(|(t, _)| now - *t > Duration::from_secs(5)) {
-            self.gaps.pop_front();
-        }
-        let worst = self.gaps.iter().map(|(_, g)| *g).max().unwrap_or(0);
-        (worst + RATE as usize / 1000 * 20).clamp(TARGET, MAX_TARGET)
+        let hi = self.lows.iter().map(|(_, x)| *x).max().unwrap_or(0);
+        let lo = self.lows.iter().map(|(_, x)| *x).min().unwrap_or(0);
+        (TARGET + (hi - lo) as usize).min(MAX_TARGET)
     }
 }
 
@@ -121,7 +127,7 @@ impl PhoneStream {
                 match s.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let target = jitter.arrived(Instant::now());
+                        let target = jitter.arrived(Instant::now(), n / 2);
                         t.store(target, Ordering::Relaxed);
                         let mut bytes: Vec<u8> = carry.take().into_iter().collect();
                         bytes.extend_from_slice(&buf[..n]);
@@ -298,7 +304,7 @@ mod tests {
         let mut k = 0;
         for ms in (0..secs * 1000).step_by(5) {
             while next_burst <= ms {
-                let t = jitter.arrived(start + Duration::from_millis(next_burst));
+                let t = jitter.arrived(start + Duration::from_millis(next_burst), burst_ms as usize * per_ms);
                 if adaptive {
                     target = t;
                 }
@@ -316,43 +322,105 @@ mod tests {
         short / per_ms
     }
 
+    /// Replays a real arrival log ("ms since first chunk,bytes", one recv per line) through the playout logic,
+    /// pulling 5 ms every 5 ms. Returns (ms of audio short after the first second, final target in ms).
+    fn replay(log: &str, adaptive: bool) -> (usize, usize) {
+        let per_ms = RATE as usize / 1000;
+        let arrivals: Vec<(u64, usize)> = log
+            .lines()
+            .filter_map(|l| l.split_once(','))
+            .map(|(t, b)| (t.trim().parse().unwrap(), b.trim().parse().unwrap()))
+            .collect();
+        let start = Instant::now();
+        let (mut jitter, mut q, mut buffering, mut short) = (Jitter::default(), VecDeque::new(), true, 0);
+        let mut target = TARGET;
+        let mut next = arrivals.iter().peekable();
+        let end = arrivals.last().unwrap().0;
+        for ms in (0..end).step_by(5) {
+            while let Some(&&(t, bytes)) = next.peek().filter(|(t, _)| *t <= ms) {
+                next.next();
+                let t = jitter.arrived(start + Duration::from_millis(t), bytes / 2);
+                if adaptive {
+                    target = t;
+                }
+                q.extend(std::iter::repeat(0.1f32).take(bytes / 2));
+            }
+            let mut out = Vec::new();
+            // The old code: start at 40 ms, then play whatever is there.
+            play(&mut q, &mut buffering, if adaptive { target } else if ms == 0 { TARGET } else { 0 }, 5 * per_ms, &mut out);
+            if ms >= 1000 {
+                short += 5 * per_ms - out.len();
+            }
+        }
+        (short / per_ms, target / per_ms)
+    }
+
+    #[test]
+    fn real_poco_screen_off_arrivals_play_without_gaps() {
+        // Measured 17 Oct 2026: POCO X6 Pro, HyperOS 2, screen off, 19 s: 46 gaps over 100 ms, the longest 201 ms.
+        let log = include_str!("fixtures/poco-screen-off-mic-arrivals.csv");
+        let (short, target) = replay(log, true);
+        let (old, _) = replay(log, false);
+        eprintln!("screen off: adaptive {short} ms short (queue {target} ms); fixed 40 ms queue {old} ms short");
+        assert!(short <= 10, "{short} ms short");
+        assert!(old > short);
+        assert!(target <= 240);
+    }
+
+    #[test]
+    fn real_poco_screen_on_arrivals_stay_at_40_ms() {
+        let log = include_str!("fixtures/poco-screen-on-mic-arrivals.csv");
+        let (short, target) = replay(log, true);
+        eprintln!("screen on: {short} ms short, queue {target} ms");
+        assert_eq!(short, 0);
+        assert!(target <= 80, "{target}");
+    }
+
     #[test]
     fn a_smooth_link_keeps_the_40_ms_queue() {
         let mut j = Jitter::default();
         let t0 = Instant::now();
         let mut target = 0;
         for i in 0..500 {
-            target = j.arrived(t0 + Duration::from_millis(i * 10));
+            target = j.arrived(t0 + Duration::from_millis(i * 10), 480);
         }
         assert_eq!(target, TARGET);
     }
 
     #[test]
-    fn bursts_grow_the_queue_and_it_shrinks_after_5_s() {
+    fn steady_bursts_cost_nothing_and_a_late_one_grows_the_queue_for_5_s() {
+        let per_ms = RATE as usize / 1000;
         let mut j = Jitter::default();
         let t0 = Instant::now();
-        j.arrived(t0);
-        let grown = j.arrived(t0 + Duration::from_millis(190));
-        assert_eq!(grown, (190 + 20) * RATE as usize / 1000);
-        let mut t = 190;
-        let mut target = grown;
-        while t < 6000 {
-            t += 10;
-            target = j.arrived(t0 + Duration::from_millis(t));
+        // 190 ms bursts, each carrying 190 ms of audio: no extra queue needed.
+        let mut target = 0;
+        for i in 0..20 {
+            target = j.arrived(t0 + Duration::from_millis(i * 190), 190 * per_ms);
         }
         assert_eq!(target, TARGET);
-        let capped = j.arrived(t0 + Duration::from_millis(t + 2000));
-        assert_eq!(capped, MAX_TARGET);
+        // One burst 100 ms late: the queue grows by that much at once...
+        let grown = j.arrived(t0 + Duration::from_millis(20 * 190 + 100), 190 * per_ms);
+        assert_eq!(grown, TARGET + 100 * per_ms);
+        // ...and shrinks back once it is 5 s old.
+        let mut t = 21 * 190 + 100;
+        while t < 21 * 190 + 100 + 5200 {
+            target = j.arrived(t0 + Duration::from_millis(t), 190 * per_ms);
+            t += 190;
+        }
+        assert_eq!(target, TARGET);
+        // A 2 s stall is capped.
+        assert_eq!(j.arrived(t0 + Duration::from_millis(t + 2000), 190 * per_ms), MAX_TARGET);
     }
 
     #[test]
-    fn screen_off_bursts_play_without_gaps() {
+    fn synthetic_late_bursts_are_mostly_covered() {
         // The POCO X6 Pro with its screen off: ~180 ms bursts, arriving up to 40 ms early or late.
         let pattern = [0, 30, 10, 40, 0, 20];
-        assert_eq!(short_ms(180, &pattern, true, 20), 0);
+        // The first late burst in a while still costs a few ms; after that the queue covers it.
+        let new = short_ms(180, &pattern, true, 20);
         // The fixed 40 ms queue it replaces came up short whenever a burst arrived late.
         let old = short_ms(180, &pattern, false, 20);
-        eprintln!("fixed 40 ms queue: {old} ms short in 19 s");
-        assert!(old > 0, "{old}");
+        eprintln!("synthetic bursts: adaptive {new} ms short, fixed 40 ms queue {old} ms short, in 19 s");
+        assert!(new * 2 < old, "{new} vs {old}");
     }
 }
