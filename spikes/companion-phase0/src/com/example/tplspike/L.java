@@ -30,6 +30,17 @@ final class L {
         }
     }
 
+    /** The last n lines of spike.log, so the laptop can read it over the link when adb is down. */
+    static synchronized String tail(int n) {
+        if (file == null) return "(no log)";
+        try {
+            java.util.List<String> all = java.nio.file.Files.readAllLines(file.toPath());
+            return String.join("\n", all.subList(Math.max(0, all.size() - n), all.size()));
+        } catch (Exception e) {
+            return "(log read failed: " + e + ")";
+        }
+    }
+
     static void e(String msg, Throwable t) {
         i(msg + " !! " + t.getClass().getName() + ": " + t.getMessage());
     }

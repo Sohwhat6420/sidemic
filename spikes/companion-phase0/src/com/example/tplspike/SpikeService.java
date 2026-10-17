@@ -1,6 +1,7 @@
 package com.example.tplspike;
 
 import android.app.ActivityManager;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -123,7 +124,7 @@ public class SpikeService extends Service {
         String src = intent == null ? "sticky" : intent.getStringExtra("src");
         L.i("onStartCommand act=" + act + " src=" + src + " flags=" + flags + " " + state());
         if (!foreground) {
-            if ("boot".equals(src)) {
+            if ("boot".equals(src) || "respawn".equals(src)) {
                 // Android 14+ should refuse microphone from BOOT_COMPLETED. Try it, record it, then fall back.
                 if (!goForeground(true, "boot-direct-mic")) goForeground(false, "boot");
                 else micType = true;
@@ -135,10 +136,28 @@ public class SpikeService extends Service {
             micOn(src, intent.getBooleanExtra("stream", false), intent.getIntExtra("secs", 0));
         } else if (intent != null && ACT_MIC_OFF.equals(intent.getAction())) {
             micOff(src);
-        } else if ("boot".equals(src)) {
-            micOn("boot-auto", false, 6);
+        } else if ("boot".equals(src) || "respawn".equals(src)) {
+            micOn(src + "-auto", false, 6);
         }
         return START_STICKY;
+    }
+
+    /**
+     * G2 trials without a reboot: an exact alarm restarts the service in a fresh process from the background, the
+     * same position a boot start leaves it in (no while-in-use mic), so each notification "Mic on" is a new trial.
+     */
+    void respawn(int delayMs) {
+        PendingIntent pi = PendingIntent.getForegroundService(this, 9,
+                new Intent(this, SpikeService.class).putExtra("src", "respawn"),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        AlarmManager am = getSystemService(AlarmManager.class);
+        am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delayMs, pi);
+        L.i("respawn: alarm in " + delayMs + " ms canExact=" + am.canScheduleExactAlarms() + ", killing process");
+        h.postDelayed(() -> {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }, 300);
     }
 
     @Override
@@ -442,6 +461,9 @@ public class SpikeService extends Service {
                     case "net": send(netReport(), false); break;
                     case "dial": send(dial(a[1], Integer.parseInt(a[2])), false); break;
                     case "nsd": registerNsd(); send("nsd re-registered", false); break;
+                    case "adbon": send(adbRig("remote"), false); break;
+                    case "log": send("log " + L.tail(a.length > 1 ? Integer.parseInt(a[1]) : 40).replace("\n", "\nlog "), false); break;
+                    case "respawn": send("respawn scheduled", false); respawn(a.length > 1 ? Integer.parseInt(a[1]) : 4000); break;
                     case "bye": break;
                     default: send("err unknown " + a[0], false);
                 }
@@ -484,9 +506,29 @@ public class SpikeService extends Service {
         public void run() {
             long ago = lastPing == 0 ? -1 : (SystemClock.elapsedRealtime() - lastPing) / 1000;
             L.i("hb " + state() + " " + powerState() + " clients=" + clients.size() + " lastPingAgo=" + ago + "s");
+            adbRig("hb");
             h.postDelayed(this, 60_000);
         }
     };
+
+    /**
+     * Test rig only (Ethan approved, 17 Oct): on Claude's own test phone, put Wireless debugging back on whenever it
+     * is found off, not only at boot. Measured 17 Oct: HyperOS switched it off by itself at ~19:49 with no reboot.
+     * Logs every time it finds it off, so how often that happens is a result too.
+     */
+    String adbRig(String why) {
+        if (checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED) return "rig: no permission";
+        try {
+            int on = android.provider.Settings.Global.getInt(getContentResolver(), "adb_wifi_enabled", 0);
+            if (on == 1) return "rig: adb_wifi_enabled already 1";
+            android.provider.Settings.Global.putInt(getContentResolver(), "adb_wifi_enabled", 1);
+            L.i("rig: adb_wifi_enabled was 0, set 1 (" + why + ") " + state());
+            return "rig: adb_wifi_enabled was 0, set 1";
+        } catch (Throwable t) {
+            L.e("rig: adb_wifi_enabled (" + why + ")", t);
+            return "rig: error " + t;
+        }
+    }
 
     String state() {
         PowerManager pm = getSystemService(PowerManager.class);

@@ -44,7 +44,8 @@ public class MainActivity extends Activity {
         sv.addView(log);
         col.addView(sv);
         setContentView(col);
-        SpikeService.start(this, null, "app-open");
+        // Route (d) test: `am start ... --ez arm true` is "open the app and press Mic on" in one step.
+        SpikeService.start(this, getIntent().getBooleanExtra("arm", false) ? SpikeService.ACT_MIC_ON : null, "app-open");
     }
 
     @Override

@@ -22,11 +22,14 @@ function log(msg) { const l = `${ts()} ${msg}`; console.log(l); if (LOG) fs.appe
 
 // ------------------------------------------------------------------ mDNS (just enough of RFC 6762/6763)
 
+/** The real LAN adapter: --iface wins; else Wi-Fi/Ethernet by name, skipping virtual adapters (VMware, Hyper-V, WSL). */
 function lanAddr() {
-  for (const [name, list] of Object.entries(os.networkInterfaces())) {
-    for (const a of list) if (a.family === 'IPv4' && !a.internal && a.address.startsWith('192.168.')) return a.address;
-  }
-  return '0.0.0.0';
+  if (opt('--iface', null)) return opt('--iface');
+  const all = Object.entries(os.networkInterfaces())
+    .filter(([name]) => !/vmware|virtual|vethernet|wsl|hyper-v|loopback|bluetooth/i.test(name))
+    .flatMap(([name, list]) => list.filter(a => a.family === 'IPv4' && !a.internal).map(a => ({ name, a: a.address })));
+  const pick = all.find(x => /wi-?fi|wlan/i.test(x.name)) || all.find(x => /ethernet/i.test(x.name)) || all[0];
+  return pick ? pick.a : '0.0.0.0';
 }
 
 function encName(n) {
@@ -100,6 +103,14 @@ if (mode === 'browse') {
   const m = mdns(f => { if (!first) first = Date.now() - t0; log(`FOUND ${f.name} ${f.addr}:${f.port} txt="${f.txt}" from=${f.from} ttl=${f.ttl} t+${Date.now() - t0}ms`); });
   setTimeout(m.ask, 300); const iv = setInterval(m.ask, 2000);
   setTimeout(() => { clearInterval(iv); m.close(); log(`browse done: first answer ${first === null ? 'NEVER' : first + ' ms'}`); process.exit(first === null ? 1 : 0); }, secs * 1000);
+} else if (mode === 'cmd') {
+  // node probe.mjs cmd <ip> <secs> "line" "line" ...   sends each line, prints every reply for <secs>
+  const [ip, secs, ...lines] = args.slice(1);
+  const s = net.connect({ host: ip, port: 27199 }, () => { for (const l of lines) s.write(l + '\n'); });
+  let buf = '';
+  s.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l.startsWith('a ')) log(`<< ${l}`); } });
+  s.on('error', e => { log(`error ${e.message}`); process.exit(1); });
+  setTimeout(() => { s.end('bye\n'); setTimeout(() => process.exit(0), 300); }, Number(secs) * 1000);
 } else {
   link();
 }
