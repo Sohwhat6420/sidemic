@@ -253,6 +253,7 @@ impl Core {
             }
             if Instant::now() >= next_speaker {
                 self.speaker = wasapi::default_render().map(|(_, n)| n).unwrap_or_default();
+                self.engine.set_speaker_name(&speaker_name(&self.speaker));
                 next_speaker = Instant::now() + Duration::from_secs(5);
             }
             if self.banner.as_ref().and_then(|b| b.until).is_some_and(|t| Instant::now() >= t) {
@@ -381,7 +382,7 @@ impl Core {
                     text: format!("Phone media started while {game} is open. Where should it play during {game}?"),
                     buttons: vec![
                         ("On the phone".into(), "answer_game".into(), format!("{exe}|phone")),
-                        ("On the Pebble".into(), "answer_game".into(), format!("{exe}|pebble")),
+                        (format!("On the {}", self.engine.speaker_name()), "answer_game".into(), format!("{exe}|speaker")),
                     ],
                     until: None,
                 });
@@ -391,7 +392,7 @@ impl Core {
                 self.banner = Some(Banner {
                     text,
                     buttons: if offers_keep {
-                        vec![("Keep on the Pebble".into(), "keep".into(), String::new())]
+                        vec![(format!("Keep on the {}", self.engine.speaker_name()), "keep".into(), String::new())]
                     } else {
                         vec![("OK".into(), "dismiss".into(), String::new())]
                     },
@@ -455,7 +456,7 @@ impl Core {
             })),
             "audio_mode" => self.set_audio_mode(parse_mode(arg).unwrap_or(AudioMode::Auto)),
             "toggle_audio" => {
-                if st.phone_audio == Placement::Pebble {
+                if st.phone_audio == Placement::Speaker {
                     if st.audio_mode == AudioMode::Laptop {
                         self.set_audio_mode(AudioMode::Auto);
                     }
@@ -558,7 +559,6 @@ impl Core {
         };
 
         let speaker = speaker_name(&self.speaker);
-        let speaker_short = if speaker.to_lowercase().contains("pebble") { "Pebble".to_owned() } else { speaker.clone() };
         let playing = st.phone_playing.then(|| {
             st.phone_package.as_deref().map(friendly_name).unwrap_or_else(|| self.media_title.clone().unwrap_or_default())
         });
@@ -576,7 +576,7 @@ impl Core {
             .map(|d| {
                 let icon = match (&d.situation, d.kind) {
                     (Some(Situation::Game { .. }), _) => "game",
-                    (_, DecisionKind::MovedToPebble | DecisionKind::KeptOnPebble) => "speaker",
+                    (_, DecisionKind::MovedToSpeaker | DecisionKind::KeptOnSpeaker) => "speaker",
                     _ => "phone",
                 };
                 let undoable = !d.corrected && d.situation.is_some();
@@ -590,7 +590,7 @@ impl Core {
             .iter()
             .map(|r| {
                 let icon = if matches!(r.situation, Situation::Game { .. }) { "game" } else { "flow" };
-                json!({"key": r.id.to_string(), "icon": icon, "text": r.describe()})
+                json!({"key": r.id.to_string(), "icon": icon, "text": r.describe(self.engine.speaker_name())})
             })
             .collect();
 
@@ -615,8 +615,8 @@ impl Core {
                 "level_db": level_db, "delay_ms": self.mic.delay_ms.load(Ordering::Relaxed) + 32, "why": mic_why,
             },
             "audio": {
-                "mode": st.audio_mode, "on_speaker": st.phone_audio == Placement::Pebble, "available": st.a2dp_available,
-                "playing": playing, "why": audio_why, "speaker": speaker, "speaker_short": speaker_short,
+                "mode": st.audio_mode, "on_speaker": st.phone_audio == Placement::Speaker, "available": st.a2dp_available,
+                "playing": playing, "why": audio_why, "speaker": speaker, "speaker_short": speaker,
             },
             "banner": self.banner.as_ref().map(|b| json!({
                 "text": b.text,
@@ -665,7 +665,7 @@ fn tooltip(connected: bool, hint: &str, live: &str, playing: &Option<String>, au
         t += &format!("\nMic: {live}");
     }
     if let Some(p) = playing {
-        t += &format!("\n{p} on the {}", if audio == Placement::Pebble { "speaker" } else { "phone" });
+        t += &format!("\n{p} on the {}", if audio == Placement::Speaker { "speaker" } else { "phone" });
     }
     t
 }

@@ -1,7 +1,7 @@
 //! TRUE Phone Link "Smart auto" policy.
 //!
 //! The laptop app makes the phone the PC microphone over Wi-Fi and can route the phone's media audio to
-//! the laptop's USB speaker (a Creative Pebble) over Bluetooth A2DP. This crate decides when. It is pure
+//! the laptop's default speaker over Bluetooth A2DP. This crate decides when. It is pure
 //! and deterministic: feed [`Engine::handle`] timestamped [`Event`]s and run the [`Action`]s it returns.
 //! There are no clocks, threads or I/O in here; send [`Event::Tick`] (ideally at
 //! [`Engine::next_deadline`]) so timers can fire.
@@ -14,7 +14,7 @@ mod memory;
 mod names;
 mod types;
 
-pub use engine::{Engine, TOAST_HANDED_BACK, TOAST_PEBBLE_LOST};
+pub use engine::{Engine, DEFAULT_SPEAKER, TOAST_BLUETOOTH_LOST, TOAST_HANDED_BACK};
 pub use memory::{Learned, Memory, Rule};
 pub use names::{friendly_name, human_duration};
 pub use types::{

@@ -14,7 +14,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-/// Phone media over Bluetooth A2DP, played on the laptop's default speaker (the Pebble). The laptop opens and
+/// Phone media over Bluetooth A2DP, played on the laptop's default speaker. The laptop opens and
 /// closes the link itself, so the phone never needs to be touched.
 #[derive(Default)]
 pub struct A2dp {

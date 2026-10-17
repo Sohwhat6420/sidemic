@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// The laptop counts as quiet once no media session has played for this long (rule 3).
     pub quiet_before_take_ms: u64,
-    /// Laptop media that keeps playing this long while the phone holds the Pebble takes it back (rule 4).
+    /// Laptop media that keeps playing this long while the phone holds the speaker takes it back (rule 4).
     pub sustained_media_ms: u64,
     /// How long after a hand-back the Keep button still works (rule 4).
     pub keep_window_ms: u64,
@@ -48,7 +48,7 @@ pub enum MicMode {
     Laptop,
 }
 
-/// Where phone media should play. `Phone` = it stays on the phone; `Laptop` = always on the Pebble.
+/// Where phone media should play. `Phone` = it stays on the phone; `Laptop` = always on the speaker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioMode {
@@ -68,20 +68,22 @@ pub enum MicRoute {
     None,
 }
 
-/// Where the phone's media audio is going: its own speaker, or the Pebble over Bluetooth A2DP.
+/// Where the phone's media audio is going: its own speaker, or the speaker over Bluetooth A2DP.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
     #[default]
     Phone,
-    Pebble,
+    /// The laptop's default speaker. Memory saved before the rename says "pebble".
+    #[serde(alias = "pebble")]
+    Speaker,
 }
 
 impl Placement {
     pub fn opposite(self) -> Self {
         match self {
-            Placement::Phone => Placement::Pebble,
-            Placement::Pebble => Placement::Phone,
+            Placement::Phone => Placement::Speaker,
+            Placement::Speaker => Placement::Phone,
         }
     }
 }
@@ -111,7 +113,7 @@ pub enum Event {
     SetSmartAuto { on: bool },
     /// Send phone audio back to the phone now.
     HandBack,
-    /// Cancel a pending or just-made hand-back and keep phone audio on the Pebble.
+    /// Cancel a pending or just-made hand-back and keep phone audio on the speaker.
     Keep,
     /// The user says a logged decision was wrong: undo it now and remember the opposite.
     ThatsWrong { decision_id: u64 },
@@ -138,14 +140,16 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {
-    /// Phone audio was moved onto the Pebble.
-    MovedToPebble,
+    /// Phone audio was moved onto the speaker.
+    #[serde(alias = "moved_to_pebble")]
+    MovedToSpeaker,
     /// Phone media started but was left on the phone.
     KeptOnPhone,
-    /// Phone audio was moved off the Pebble back to the phone.
+    /// Phone audio was moved off the speaker back to the phone.
     MovedToPhone,
-    /// Laptop media would have taken the Pebble back, but phone audio was left there.
-    KeptOnPebble,
+    /// Laptop media would have taken the speaker back, but phone audio was left there.
+    #[serde(alias = "kept_on_pebble")]
+    KeptOnSpeaker,
 }
 
 /// The situation a decision was made in. A `ThatsWrong` stores a rule under this key, so the next time
@@ -154,8 +158,9 @@ pub enum DecisionKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Situation {
     /// This phone app started media while phone audio was on the phone.
-    TakePebble { phone_package: String },
-    /// This laptop app played long enough to take the Pebble back.
+    #[serde(alias = "take_pebble")]
+    TakeSpeaker { phone_package: String },
+    /// This laptop app played long enough to take the speaker back.
     Handback { laptop_app: String },
     /// Phone media started while this game (exe, lower case) was in the foreground.
     Game { exe: String },
@@ -167,7 +172,7 @@ pub struct Decision {
     pub id: u64,
     pub at_ms: u64,
     pub kind: DecisionKind,
-    /// What happened, e.g. "Moved TikTok to the Pebble".
+    /// What happened, e.g. "Moved TikTok to the speaker".
     pub text: String,
     /// Why, e.g. "The laptop had been quiet for 2 minutes".
     pub reason: String,

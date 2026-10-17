@@ -10,8 +10,10 @@ use crate::types::{
 
 /// Toast shown after an automatic hand-back (it carries a Keep button).
 pub const TOAST_HANDED_BACK: &str = "Phone audio moved back to the phone";
-/// Toast shown when Bluetooth audio drops while phone audio was on the Pebble.
-pub const TOAST_PEBBLE_LOST: &str = "The Pebble's Bluetooth link dropped, so phone audio is back on the phone";
+/// The speaker's name until the app sets one with [`Engine::set_speaker_name`].
+pub const DEFAULT_SPEAKER: &str = "speaker";
+/// Toast shown when Bluetooth audio from the phone drops while phone audio was on the speaker.
+pub const TOAST_BLUETOOTH_LOST: &str = "Bluetooth audio from the phone dropped, so phone audio is back on the phone";
 
 #[derive(Clone, Debug)]
 struct HandbackRecord {
@@ -28,6 +30,8 @@ pub struct Engine {
     log: Vec<Decision>,
     next_decision_id: u64,
     now: u64,
+    /// The speaker's display name in decision texts ("Moved TikTok to the {speaker}").
+    speaker: String,
 
     mic_mode: MicMode,
     audio_mode: AudioMode,
@@ -44,7 +48,7 @@ pub struct Engine {
     last_media_stop: Option<u64>,
     laptop_sounds: BTreeSet<String>,
     /// Laptop media sessions that must not hand back (Keep, a learned rule, or already playing when the
-    /// phone took the Pebble). Cleared per app when its session stops.
+    /// phone took the speaker). Cleared per app when its session stops.
     kept_sessions: BTreeSet<String>,
 
     phone_playing: bool,
@@ -71,6 +75,7 @@ impl Engine {
             log: Vec::new(),
             next_decision_id: 1,
             now: 0,
+            speaker: DEFAULT_SPEAKER.to_string(),
             mic_mode: MicMode::Auto,
             audio_mode: AudioMode::Auto,
             smart_auto: true,
@@ -98,6 +103,18 @@ impl Engine {
 
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    /// The name decision texts use for the laptop's default speaker, e.g. "Creative Pebble V3".
+    /// Empty means "speaker". Decisions already logged keep the name they were made with.
+    pub fn set_speaker_name(&mut self, name: &str) {
+        let name = name.trim();
+        self.speaker = if name.is_empty() { DEFAULT_SPEAKER.to_string() } else { name.to_string() };
+    }
+
+    /// The name set by [`Engine::set_speaker_name`], for [`Rule::describe`](crate::Rule::describe).
+    pub fn speaker_name(&self) -> &str {
+        &self.speaker
     }
 
     /// The decision log, oldest first, at most `Config::decision_log_len` entries.
@@ -177,7 +194,7 @@ impl Engine {
             Event::SetAudioMode { mode } => self.on_audio_mode(mode, &mut out),
             Event::SetSmartAuto { on } => self.smart_auto = on,
             Event::HandBack => {
-                if self.phone_audio == Placement::Pebble {
+                if self.phone_audio == Placement::Speaker {
                     self.hand_back(&mut out);
                 }
             }
@@ -251,19 +268,19 @@ impl Engine {
         self.a2dp_available = a2dp_available;
 
         // Rule 10: Bluetooth audio went away under us. CloseA2dp cannot run, so just drop the state.
-        if !a2dp_available && self.phone_audio == Placement::Pebble {
+        if !a2dp_available && self.phone_audio == Placement::Speaker {
             self.phone_audio = Placement::Phone;
             self.kept_sessions.clear();
             self.last_handback = None;
             self.release_duck_now(out);
-            out.push(Action::Toast { text: TOAST_PEBBLE_LOST.to_string(), offers_keep: false });
+            out.push(Action::Toast { text: TOAST_BLUETOOTH_LOST.to_string(), offers_keep: false });
         }
         if a2dp_available
             && !had_a2dp
             && self.audio_mode == AudioMode::Laptop
             && self.phone_audio == Placement::Phone
         {
-            self.open_pebble(out);
+            self.open_speaker(out);
         }
         self.update_mic_route(out);
     }
@@ -272,13 +289,13 @@ impl Engine {
         self.audio_mode = mode;
         match mode {
             AudioMode::Phone => {
-                if self.phone_audio == Placement::Pebble {
+                if self.phone_audio == Placement::Speaker {
                     self.hand_back(out);
                 }
             }
             AudioMode::Laptop => {
                 if self.phone_audio == Placement::Phone && self.a2dp_available {
-                    self.open_pebble(out);
+                    self.open_speaker(out);
                 }
             }
             AudioMode::Auto => {}
@@ -287,11 +304,11 @@ impl Engine {
 
     // ---- moving phone audio ----------------------------------------------------------------------
 
-    fn open_pebble(&mut self, out: &mut Vec<Action>) {
+    fn open_speaker(&mut self, out: &mut Vec<Action>) {
         out.push(Action::OpenA2dp);
-        self.phone_audio = Placement::Pebble;
-        // Laptop media already playing when the phone takes the Pebble was accepted alongside it,
-        // so it must not immediately take the Pebble back.
+        self.phone_audio = Placement::Speaker;
+        // Laptop media already playing when the phone takes the speaker was accepted alongside it,
+        // so it must not immediately take the speaker back.
         let playing: Vec<String> = self.laptop_media.keys().cloned().collect();
         self.kept_sessions.extend(playing);
         self.last_handback = None;
@@ -367,13 +384,13 @@ impl Engine {
     }
 
     fn consider_take(&mut self, package: &str, out: &mut Vec<Action>) {
-        if self.phone_audio == Placement::Pebble || !self.a2dp_available {
+        if self.phone_audio == Placement::Speaker || !self.a2dp_available {
             return;
         }
         match self.audio_mode {
             AudioMode::Phone => return,
             AudioMode::Laptop => {
-                self.open_pebble(out);
+                self.open_speaker(out);
                 return;
             }
             AudioMode::Auto => {}
@@ -382,7 +399,7 @@ impl Engine {
             return;
         }
         let name = friendly_name(package);
-        let moved = format!("Moved {name} to the Pebble");
+        let moved = format!("Moved {name} to the {}", self.speaker);
         let kept = format!("Kept {name} on the phone");
 
         // Rule 7: a game is in the foreground.
@@ -390,10 +407,10 @@ impl Engine {
             let situation = Situation::Game { exe: exe.clone() };
             if let Some(rule) = self.mem.rule_for(&situation) {
                 match rule.placement {
-                    Placement::Pebble => {
-                        self.open_pebble(out);
-                        let reason = format!("You chose the Pebble while {exe} is open");
-                        self.decide(DecisionKind::MovedToPebble, moved, reason, Some(situation), Placement::Pebble);
+                    Placement::Speaker => {
+                        self.open_speaker(out);
+                        let reason = format!("You chose the {} while {exe} is open", self.speaker);
+                        self.decide(DecisionKind::MovedToSpeaker, moved, reason, Some(situation), Placement::Speaker);
                     }
                     Placement::Phone => {
                         let reason = format!("You chose the phone while {exe} is open");
@@ -403,20 +420,20 @@ impl Engine {
             } else if self.games_asked.insert(exe.clone()) {
                 self.waiting_game = Some(exe.clone());
                 out.push(Action::AskAboutGame { exe: exe.clone() });
-                let reason = format!("Asked whether phone audio may use the Pebble while {exe} is open");
+                let reason = format!("Asked whether phone audio may use the {} while {exe} is open", self.speaker);
                 self.decide(DecisionKind::KeptOnPhone, kept, reason, Some(situation), Placement::Phone);
             }
             return;
         }
 
-        let situation = Situation::TakePebble { phone_package: package.to_string() };
+        let situation = Situation::TakeSpeaker { phone_package: package.to_string() };
         // Rule 8: a learned rule for this phone app wins.
         if let Some(rule) = self.mem.rule_for(&situation) {
             match rule.placement {
-                Placement::Pebble => {
-                    self.open_pebble(out);
-                    let reason = format!("You asked for {name} to go to the Pebble");
-                    self.decide(DecisionKind::MovedToPebble, moved, reason, Some(situation), Placement::Pebble);
+                Placement::Speaker => {
+                    self.open_speaker(out);
+                    let reason = format!("You asked for {name} to go to the {}", self.speaker);
+                    self.decide(DecisionKind::MovedToSpeaker, moved, reason, Some(situation), Placement::Speaker);
                 }
                 Placement::Phone => {
                     let reason = format!("You asked for {name} to stay on the phone");
@@ -438,16 +455,16 @@ impl Engine {
             return;
         }
 
-        // Rule 3: the laptop is quiet, so take the Pebble.
-        self.open_pebble(out);
+        // Rule 3: the laptop is quiet, so take the speaker.
+        self.open_speaker(out);
         let reason = match self.last_media_stop {
             Some(t) => format!("The laptop had been quiet for {}", human_duration(self.now - t)),
             None => "The laptop was quiet".to_string(),
         };
-        self.decide(DecisionKind::MovedToPebble, moved, reason, Some(situation), Placement::Pebble);
+        self.decide(DecisionKind::MovedToSpeaker, moved, reason, Some(situation), Placement::Speaker);
     }
 
-    // ---- rules 4 and 5: laptop media and sounds while the phone holds the Pebble -----------------
+    // ---- rules 4 and 5: laptop media and sounds while the phone holds the speaker -----------------
 
     fn on_laptop_media(&mut self, playing: bool, app_id: String) {
         if playing {
@@ -461,11 +478,11 @@ impl Engine {
     }
 
     fn handback_eligible(&self) -> bool {
-        self.phone_audio == Placement::Pebble && self.audio_mode == AudioMode::Auto && self.smart_auto
+        self.phone_audio == Placement::Speaker && self.audio_mode == AudioMode::Auto && self.smart_auto
     }
 
     fn run_timers(&mut self, out: &mut Vec<Action>) {
-        // Rule 4: sustained laptop media takes the Pebble back.
+        // Rule 4: sustained laptop media takes the speaker back.
         while self.handback_eligible() {
             let due = self
                 .laptop_media
@@ -482,9 +499,9 @@ impl Engine {
             let situation = Situation::Handback { laptop_app: app.clone() };
             if self.never_hands_back(&app) {
                 self.kept_sessions.insert(app);
-                let text = format!("Kept {phone_name} on the Pebble");
+                let text = format!("Kept {phone_name} on the {}", self.speaker);
                 let reason = format!("You asked to keep it there when {app_name} plays");
-                self.decide(DecisionKind::KeptOnPebble, text, reason, Some(situation), Placement::Pebble);
+                self.decide(DecisionKind::KeptOnSpeaker, text, reason, Some(situation), Placement::Speaker);
                 continue;
             }
             self.hand_back(out);
@@ -519,17 +536,17 @@ impl Engine {
         sound || pending_media
     }
 
-    /// A learned rule says this laptop app leaves phone audio on the Pebble.
+    /// A learned rule says this laptop app leaves phone audio on the speaker.
     fn never_hands_back(&self, laptop_app: &str) -> bool {
         self.mem
             .rule_for(&Situation::Handback { laptop_app: laptop_app.to_string() })
-            .is_some_and(|r| r.placement == Placement::Pebble)
+            .is_some_and(|r| r.placement == Placement::Speaker)
     }
 
     fn update_duck(&mut self, out: &mut Vec<Action>) {
         if self.duck_sources_active() {
             self.duck_release_at = None;
-            if !self.ducked && self.phone_audio == Placement::Pebble && self.phone_playing && self.mic_link {
+            if !self.ducked && self.phone_audio == Placement::Speaker && self.phone_playing && self.mic_link {
                 out.push(Action::DuckPhone);
                 self.ducked = true;
             }
@@ -546,7 +563,7 @@ impl Engine {
                 && self.phone_audio == Placement::Phone
                 && self.a2dp_available
             {
-                self.open_pebble(out);
+                self.open_speaker(out);
                 self.kept_sessions.insert(h.laptop_app.clone());
                 self.mark_corrected(h.decision_id);
                 self.mem.count_keep(&h.laptop_app, self.cfg.keeps_to_learn, self.now);
@@ -585,15 +602,15 @@ impl Engine {
         let phone_name = self.phone_name();
         let reason = "You said the earlier decision was wrong".to_string();
         match flipped {
-            Placement::Pebble => {
+            Placement::Speaker => {
                 if self.phone_audio == Placement::Phone && self.a2dp_available {
-                    self.open_pebble(out);
-                    let text = format!("Moved {phone_name} to the Pebble");
-                    self.decide(DecisionKind::MovedToPebble, text, reason, None, Placement::Pebble);
+                    self.open_speaker(out);
+                    let text = format!("Moved {phone_name} to the {}", self.speaker);
+                    self.decide(DecisionKind::MovedToSpeaker, text, reason, None, Placement::Speaker);
                 }
             }
             Placement::Phone => {
-                if self.phone_audio == Placement::Pebble {
+                if self.phone_audio == Placement::Speaker {
                     self.hand_back(out);
                     let text = format!("Moved {phone_name} back to the phone");
                     self.decide(DecisionKind::MovedToPhone, text, reason, None, Placement::Phone);
@@ -604,7 +621,7 @@ impl Engine {
 
     fn on_answer_game(&mut self, exe: String, keep_on_phone: bool, out: &mut Vec<Action>) {
         let exe = exe.to_ascii_lowercase();
-        let placement = if keep_on_phone { Placement::Phone } else { Placement::Pebble };
+        let placement = if keep_on_phone { Placement::Phone } else { Placement::Speaker };
         let situation = Situation::Game { exe: exe.clone() };
         self.mem.set_rule(situation.clone(), placement, Learned::GameAnswer, self.now);
         self.games_asked.remove(&exe);
@@ -617,16 +634,16 @@ impl Engine {
         }
         let phone_name = self.phone_name();
         match placement {
-            Placement::Pebble => {
+            Placement::Speaker => {
                 if self.phone_audio == Placement::Phone && self.a2dp_available {
-                    self.open_pebble(out);
-                    let text = format!("Moved {phone_name} to the Pebble");
-                    let reason = format!("You chose the Pebble while {exe} is open");
-                    self.decide(DecisionKind::MovedToPebble, text, reason, Some(situation), Placement::Pebble);
+                    self.open_speaker(out);
+                    let text = format!("Moved {phone_name} to the {}", self.speaker);
+                    let reason = format!("You chose the {} while {exe} is open", self.speaker);
+                    self.decide(DecisionKind::MovedToSpeaker, text, reason, Some(situation), Placement::Speaker);
                 }
             }
             Placement::Phone => {
-                if self.phone_audio == Placement::Pebble {
+                if self.phone_audio == Placement::Speaker {
                     self.hand_back(out);
                     let text = format!("Moved {phone_name} back to the phone");
                     let reason = format!("You chose the phone while {exe} is open");

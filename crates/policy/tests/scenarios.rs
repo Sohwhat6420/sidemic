@@ -74,15 +74,15 @@ fn toast_keep() -> Action {
 use Action::{CloseA2dp, DuckPhone, OpenA2dp, PhonePause, PhonePlay, UnduckPhone};
 use Event::{HandBack, Keep, Tick};
 
-/// Link up, laptop idle, TikTok starts at 1 s and takes the Pebble (decision 1).
-fn on_pebble() -> Vec<Step> {
+/// Link up, laptop idle, TikTok starts at 1 s and takes the speaker (decision 1).
+fn on_speaker() -> Vec<Step> {
     vec![st(0, link(true, true), vec![]), st(1_000, phone(TIKTOK, true), vec![OpenA2dp])]
 }
 
-/// From `on_pebble`, Chrome plays from 10 s and hands back at 13 s (decision 2).
+/// From `on_speaker`, Chrome plays from 10 s and hands back at 13 s (decision 2).
 fn handed_back() -> Vec<Step> {
     [
-        on_pebble(),
+        on_speaker(),
         vec![
             st(10_000, laptop(CHROME, true), vec![DuckPhone]),
             st(12_000, Tick, vec![]),
@@ -200,17 +200,17 @@ fn rule1_2_microphone_and_echo_guard() {
     ]);
 }
 
-// ---- rule 3: idle laptop -> Pebble -------------------------------------------------------------
+// ---- rule 3: idle laptop -> speaker -------------------------------------------------------------
 
 #[test]
-fn rule3_idle_laptop_takes_the_pebble() {
+fn rule3_idle_laptop_takes_the_speaker() {
     run(vec![
-        case("Laptop idle + TikTok starts -> OpenA2dp", on_pebble(), |e| {
+        case("Laptop idle + TikTok starts -> OpenA2dp", on_speaker(), |e| {
             let d = last(e);
-            assert_eq!(d.kind, DecisionKind::MovedToPebble);
-            assert_eq!(d.text, "Moved TikTok to the Pebble");
+            assert_eq!(d.kind, DecisionKind::MovedToSpeaker);
+            assert_eq!(d.text, "Moved TikTok to the speaker");
             assert_eq!(d.reason, "The laptop was quiet");
-            assert_eq!(e.state().phone_audio, Placement::Pebble);
+            assert_eq!(e.state().phone_audio, Placement::Speaker);
         }),
         case(
             "Reason names how long the laptop had been quiet",
@@ -279,7 +279,7 @@ fn rule6_laptop_media_playing_keeps_phone_on_phone() {
                 assert_eq!(d.kind, DecisionKind::KeptOnPhone);
                 assert_eq!(d.text, "Kept TikTok on the phone");
                 assert_eq!(d.reason, "Chrome was playing on the laptop");
-                assert_eq!(d.situation, Some(Situation::TakePebble { phone_package: TIKTOK.into() }));
+                assert_eq!(d.situation, Some(Situation::TakeSpeaker { phone_package: TIKTOK.into() }));
             },
         ),
         case(
@@ -303,7 +303,7 @@ fn rule6_laptop_media_playing_keeps_phone_on_phone() {
 fn rule4_sustained_laptop_media_hands_back() {
     run(vec![
         case(
-            "YouTube plays 3 s while on the Pebble -> CloseA2dp, PhonePlay, Toast with Keep",
+            "YouTube plays 3 s while on the speaker -> CloseA2dp, PhonePlay, Toast with Keep",
             [
                 handed_back(),
                 vec![
@@ -326,7 +326,7 @@ fn rule4_sustained_laptop_media_hands_back() {
         case(
             "A late event still fires the hand-back first, at the deadline",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(10_000, laptop(CHROME, true), vec![DuckPhone]),
                     st(15_000, laptop(CHROME, false), vec![CloseA2dp, UnduckPhone, PhonePlay, toast_keep()]),
@@ -343,7 +343,7 @@ fn rule4_sustained_laptop_media_hands_back() {
             ]
             .concat(),
             |e| {
-                assert_eq!(e.state().phone_audio, Placement::Pebble);
+                assert_eq!(e.state().phone_audio, Placement::Speaker);
                 assert_eq!(e.memory().keep_count(CHROME), 1);
                 assert!(e.memory().rules().is_empty());
                 assert!(e.decisions()[1].corrected);
@@ -357,7 +357,7 @@ fn rule4_sustained_laptop_media_hands_back() {
         case(
             "Keep while a hand-back is still pending cancels it",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(10_000, laptop(CHROME, true), vec![DuckPhone]),
                     st(11_000, Keep, vec![]),
@@ -370,12 +370,12 @@ fn rule4_sustained_laptop_media_hands_back() {
         ),
         case(
             "Manual HandBack works any time",
-            [on_pebble(), vec![st(2_000, HandBack, vec![CloseA2dp, PhonePlay])]].concat(),
+            [on_speaker(), vec![st(2_000, HandBack, vec![CloseA2dp, PhonePlay])]].concat(),
             |e| assert_eq!(e.decisions().len(), 1),
         ),
         case(
             "next_deadline points at the hand-back",
-            [on_pebble(), vec![st(10_000, laptop(CHROME, true), vec![DuckPhone])]].concat(),
+            [on_speaker(), vec![st(10_000, laptop(CHROME, true), vec![DuckPhone])]].concat(),
             |e| assert_eq!(e.next_deadline(), Some(13_000)),
         ),
     ]);
@@ -389,7 +389,7 @@ fn rule5_short_sounds_duck_and_never_hand_back() {
         case(
             "YouTube plays 1 s -> only a duck, released after 600 ms of silence",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(10_000, laptop(CHROME, true), vec![DuckPhone]),
                     st(11_000, laptop(CHROME, false), vec![]),
@@ -400,14 +400,14 @@ fn rule5_short_sounds_duck_and_never_hand_back() {
             ]
             .concat(),
             |e| {
-                assert_eq!(e.state().phone_audio, Placement::Pebble);
+                assert_eq!(e.state().phone_audio, Placement::Speaker);
                 assert_eq!(e.decisions().len(), 1);
             },
         ),
         case(
             "Discord ping -> duck, a second ping cancels the release, unduck after silence",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(10_000, sound(DISCORD, true), vec![DuckPhone]),
                     st(10_200, sound(DISCORD, false), vec![]),
@@ -423,11 +423,11 @@ fn rule5_short_sounds_duck_and_never_hand_back() {
         case(
             "A long Discord sound never hands back",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![st(10_000, sound(DISCORD, true), vec![DuckPhone]), st(60_000, Tick, vec![])],
             ]
             .concat(),
-            |e| assert_eq!(e.state().phone_audio, Placement::Pebble),
+            |e| assert_eq!(e.state().phone_audio, Placement::Speaker),
         ),
         case(
             "Pings while phone audio is on the phone do nothing",
@@ -447,8 +447,8 @@ fn rule5_short_sounds_duck_and_never_hand_back() {
 
 #[test]
 fn rule7_game_prompt_asked_once_and_remembered() {
-    let mut pebble_for_game = Memory::default();
-    pebble_for_game.set_rule(Situation::Game { exe: GAME.into() }, Placement::Pebble, Learned::GameAnswer, 0);
+    let mut speaker_for_game = Memory::default();
+    speaker_for_game.set_rule(Situation::Game { exe: GAME.into() }, Placement::Speaker, Learned::GameAnswer, 0);
     let mut phone_for_game = Memory::default();
     phone_for_game.set_rule(Situation::Game { exe: GAME.into() }, Placement::Phone, Learned::GameAnswer, 0);
 
@@ -468,9 +468,9 @@ fn rule7_game_prompt_asked_once_and_remembered() {
                 st(20_000, phone(TIKTOK, true), vec![OpenA2dp]),
             ],
             |e| {
-                assert_eq!(rule(e, Situation::Game { exe: GAME.into() }), Some((Placement::Pebble, Learned::GameAnswer)));
+                assert_eq!(rule(e, Situation::Game { exe: GAME.into() }), Some((Placement::Speaker, Learned::GameAnswer)));
                 assert_eq!(e.state().waiting_on_game, None);
-                assert_eq!(last(e).reason, "You chose the Pebble while eldenring.exe is open");
+                assert_eq!(last(e).reason, "You chose the speaker while eldenring.exe is open");
                 let asks = e.decisions().iter().filter(|d| d.reason.starts_with("Asked")).count();
                 assert_eq!(asks, 1);
             },
@@ -489,8 +489,8 @@ fn rule7_game_prompt_asked_once_and_remembered() {
             },
         },
         Case {
-            name: "In a game sharing the Pebble, the game's own sounds do not duck the phone",
-            memory: pebble_for_game,
+            name: "In a game sharing the speaker, the game's own sounds do not duck the phone",
+            memory: speaker_for_game,
             steps: vec![
                 st(0, link(true, true), vec![]),
                 st(100, fg(GAME, true), vec![]),
@@ -518,9 +518,9 @@ fn rule7_game_prompt_asked_once_and_remembered() {
 fn rule8_thats_wrong_flips_and_is_remembered() {
     run(vec![
         case(
-            "Wrong 'Moved TikTok to the Pebble' -> back to the phone now, and next time it stays",
+            "Wrong 'Moved TikTok to the speaker' -> back to the phone now, and next time it stays",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(2_000, wrong(1), vec![CloseA2dp, PhonePlay]),
                     st(2_100, phone(TIKTOK, false), vec![]),
@@ -533,14 +533,14 @@ fn rule8_thats_wrong_flips_and_is_remembered() {
             ]
             .concat(),
             |e| {
-                let s = Situation::TakePebble { phone_package: TIKTOK.into() };
+                let s = Situation::TakeSpeaker { phone_package: TIKTOK.into() };
                 assert_eq!(rule(e, s), Some((Placement::Phone, Learned::ThatsWrong)));
                 assert_eq!(last(e).text, "Kept TikTok on the phone");
                 assert_eq!(last(e).reason, "You asked for TikTok to stay on the phone");
             },
         ),
         case(
-            "Wrong 'Kept TikTok on the phone' (YouTube playing) -> Pebble now, no hand-back, and next time too",
+            "Wrong 'Kept TikTok on the phone' (YouTube playing) -> speaker now, no hand-back, and next time too",
             vec![
                 st(0, link(true, true), vec![]),
                 st(1_000, laptop(CHROME, true), vec![]),
@@ -552,9 +552,9 @@ fn rule8_thats_wrong_flips_and_is_remembered() {
                 st(60_000, phone(TIKTOK, true), vec![OpenA2dp]),
             ],
             |e| {
-                let s = Situation::TakePebble { phone_package: TIKTOK.into() };
-                assert_eq!(rule(e, s), Some((Placement::Pebble, Learned::ThatsWrong)));
-                assert_eq!(last(e).reason, "You asked for TikTok to go to the Pebble");
+                let s = Situation::TakeSpeaker { phone_package: TIKTOK.into() };
+                assert_eq!(rule(e, s), Some((Placement::Speaker, Learned::ThatsWrong)));
+                assert_eq!(last(e).reason, "You asked for TikTok to go to the speaker");
             },
         ),
         case(
@@ -570,12 +570,12 @@ fn rule8_thats_wrong_flips_and_is_remembered() {
             ]
             .concat(),
             |e| {
-                assert_eq!(rule(e, handback_chrome()), Some((Placement::Pebble, Learned::ThatsWrong)));
-                assert_eq!(last(e).kind, DecisionKind::KeptOnPebble);
-                assert_eq!(e.state().phone_audio, Placement::Pebble);
+                assert_eq!(rule(e, handback_chrome()), Some((Placement::Speaker, Learned::ThatsWrong)));
+                assert_eq!(last(e).kind, DecisionKind::KeptOnSpeaker);
+                assert_eq!(e.state().phone_audio, Placement::Speaker);
             },
         ),
-        case("Unknown decision id -> nothing", [on_pebble(), vec![st(2_000, wrong(99), vec![])]].concat(), |e| {
+        case("Unknown decision id -> nothing", [on_speaker(), vec![st(2_000, wrong(99), vec![])]].concat(), |e| {
             assert!(e.memory().rules().is_empty())
         }),
         case(
@@ -597,11 +597,11 @@ fn rule8_thats_wrong_flips_and_is_remembered() {
             ]
             .concat(),
             |e| {
-                assert_eq!(rule(e, handback_chrome()), Some((Placement::Pebble, Learned::KeptRepeatedly)));
+                assert_eq!(rule(e, handback_chrome()), Some((Placement::Speaker, Learned::KeptRepeatedly)));
                 assert_eq!(e.memory().keep_count(CHROME), 0);
                 let d = last(e);
-                assert_eq!(d.kind, DecisionKind::KeptOnPebble);
-                assert_eq!(d.text, "Kept TikTok on the Pebble");
+                assert_eq!(d.kind, DecisionKind::KeptOnSpeaker);
+                assert_eq!(d.text, "Kept TikTok on the speaker");
                 assert_eq!(d.reason, "You asked to keep it there when Chrome plays");
             },
         ),
@@ -650,7 +650,7 @@ fn audio_modes_and_rule10_connectivity() {
         case(
             "Audio mode Phone hands back and blocks takes",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(2_000, Event::SetAudioMode { mode: AudioMode::Phone }, vec![CloseA2dp, PhonePlay]),
                     st(3_000, phone(TIKTOK, false), vec![]),
@@ -672,19 +672,19 @@ fn audio_modes_and_rule10_connectivity() {
             ],
             |e| {
                 assert!(e.decisions().is_empty());
-                assert_eq!(e.state().phone_audio, Placement::Pebble);
+                assert_eq!(e.state().phone_audio, Placement::Speaker);
             },
         ),
         case(
-            "Bluetooth drops while on the Pebble -> state dropped, no CloseA2dp",
+            "Bluetooth drops while on the speaker -> state dropped, no CloseA2dp",
             [
-                on_pebble(),
+                on_speaker(),
                 vec![
                     st(2_000, sound(DISCORD, true), vec![DuckPhone]),
                     st(
                         3_000,
                         link(true, false),
-                        vec![UnduckPhone, Action::Toast { text: TOAST_PEBBLE_LOST.into(), offers_keep: false }],
+                        vec![UnduckPhone, Action::Toast { text: TOAST_BLUETOOTH_LOST.into(), offers_keep: false }],
                     ),
                     st(4_000, sound(DISCORD, false), vec![]),
                     st(10_000, Tick, vec![]),
@@ -724,11 +724,11 @@ fn decision_log_keeps_the_last_50() {
 #[test]
 fn memory_json_round_trip_and_rules_page() {
     let mut m = Memory::new();
-    let a = m.set_rule(Situation::TakePebble { phone_package: TIKTOK.into() }, Placement::Phone, Learned::ThatsWrong, 5);
-    let b = m.set_rule(handback_chrome(), Placement::Pebble, Learned::KeptRepeatedly, 6);
-    m.set_rule(Situation::Game { exe: GAME.into() }, Placement::Pebble, Learned::GameAnswer, 7);
+    let a = m.set_rule(Situation::TakeSpeaker { phone_package: TIKTOK.into() }, Placement::Phone, Learned::ThatsWrong, 5);
+    let b = m.set_rule(handback_chrome(), Placement::Speaker, Learned::KeptRepeatedly, 6);
+    m.set_rule(Situation::Game { exe: GAME.into() }, Placement::Speaker, Learned::GameAnswer, 7);
     // Replacing a rule for the same situation keeps one rule.
-    let a2 = m.set_rule(Situation::TakePebble { phone_package: TIKTOK.into() }, Placement::Pebble, Learned::ThatsWrong, 8);
+    let a2 = m.set_rule(Situation::TakeSpeaker { phone_package: TIKTOK.into() }, Placement::Speaker, Learned::ThatsWrong, 8);
     assert_ne!(a, a2);
     assert_eq!(m.rules().len(), 3);
 
@@ -736,13 +736,13 @@ fn memory_json_round_trip_and_rules_page() {
     let back = Memory::from_json(&json).expect("round trip");
     assert_eq!(back, m);
 
-    let described: Vec<String> = back.rules().iter().map(Rule::describe).collect();
+    let described: Vec<String> = back.rules().iter().map(|r| r.describe(DEFAULT_SPEAKER)).collect();
     assert_eq!(
         described,
         vec![
-            "Phone audio stays on the Pebble when Chrome plays",
-            "Phone audio may use the Pebble while eldenring.exe is open",
-            "TikTok moves to the Pebble, even when the laptop is playing",
+            "Phone audio stays on the speaker when Chrome plays",
+            "Phone audio may use the speaker while eldenring.exe is open",
+            "TikTok moves to the speaker, even when the laptop is playing",
         ]
     );
 
@@ -756,7 +756,7 @@ fn memory_json_round_trip_and_rules_page() {
 
     // A learned engine memory survives a save and reload into a new engine.
     let mut e = Engine::new(Config::default(), Memory::default());
-    for s in [on_pebble(), vec![st(2_000, wrong(1), vec![])]].concat() {
+    for s in [on_speaker(), vec![st(2_000, wrong(1), vec![])]].concat() {
         e.handle(s.at, s.ev);
     }
     let saved = e.memory().to_json();
@@ -764,6 +764,51 @@ fn memory_json_round_trip_and_rules_page() {
     e2.handle(0, link(true, true));
     assert_eq!(e2.handle(1_000, phone(TIKTOK, true)), vec![]);
     assert_eq!(e2.decisions()[0].reason, "You asked for TikTok to stay on the phone");
+}
+
+#[test]
+fn texts_use_the_speakers_own_name() {
+    let mut e = Engine::new(Config::default(), Memory::default());
+    assert_eq!(e.speaker_name(), DEFAULT_SPEAKER);
+    e.set_speaker_name("  Desk Speakers ");
+    assert_eq!(e.speaker_name(), "Desk Speakers");
+    for s in on_speaker() {
+        e.handle(s.at, s.ev);
+    }
+    assert_eq!(last(&e).text, "Moved TikTok to the Desk Speakers");
+    let rule = Rule {
+        id: 1,
+        situation: handback_chrome(),
+        placement: Placement::Speaker,
+        learned: Learned::KeptRepeatedly,
+        at_ms: 0,
+    };
+    assert_eq!(rule.describe(e.speaker_name()), "Phone audio stays on the Desk Speakers when Chrome plays");
+    e.set_speaker_name("");
+    assert_eq!(e.speaker_name(), DEFAULT_SPEAKER);
+}
+
+#[test]
+fn memory_saved_with_the_old_pebble_names_still_loads() {
+    let old = r#"{
+      "rules": [
+        {"id": 1, "situation": {"kind": "take_pebble", "phone_package": "com.zhiliaoapp.musically"},
+         "placement": "pebble", "learned": "thats_wrong", "at_ms": 5},
+        {"id": 2, "situation": {"kind": "handback", "laptop_app": "Chrome"},
+         "placement": "phone", "learned": "kept_repeatedly", "at_ms": 6}
+      ],
+      "keep_counts": {"powershell.exe": 1},
+      "next_rule_id": 3
+    }"#;
+    let m = Memory::from_json(old).expect("old memory loads");
+    let take = Situation::TakeSpeaker { phone_package: TIKTOK.into() };
+    assert_eq!(m.rule_for(&take).map(|r| r.placement), Some(Placement::Speaker));
+    assert_eq!(m.keep_count("powershell.exe"), 1);
+    // It is saved back under the new names.
+    let json = m.to_json();
+    assert!(!json.contains("pebble"), "{json}");
+    assert_eq!(serde_json::from_str::<DecisionKind>(r#""moved_to_pebble""#).unwrap(), DecisionKind::MovedToSpeaker);
+    assert_eq!(serde_json::from_str::<DecisionKind>(r#""kept_on_pebble""#).unwrap(), DecisionKind::KeptOnSpeaker);
 }
 
 #[test]
@@ -780,7 +825,7 @@ fn events_actions_and_state_serialise() {
     }
     assert_eq!(serde_json::to_string(&use_mic(MicRoute::Phone)).unwrap(), r#"{"type":"use_mic","route":"phone"}"#);
     let mut e = Engine::new(Config::default(), Memory::default());
-    for s in on_pebble() {
+    for s in on_speaker() {
         e.handle(s.at, s.ev);
     }
     let state = e.state();

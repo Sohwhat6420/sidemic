@@ -30,26 +30,27 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// A one-line description for the Rules page.
-    pub fn describe(&self) -> String {
+    /// A one-line description for the Rules page. `speaker` is the speaker's display name, as in
+    /// [`Engine::set_speaker_name`](crate::Engine::set_speaker_name).
+    pub fn describe(&self, speaker: &str) -> String {
         match (&self.situation, self.placement) {
-            (Situation::TakePebble { phone_package }, Placement::Phone) => {
+            (Situation::TakeSpeaker { phone_package }, Placement::Phone) => {
                 format!("{} stays on the phone", friendly_name(phone_package))
             }
-            (Situation::TakePebble { phone_package }, Placement::Pebble) => format!(
-                "{} moves to the Pebble, even when the laptop is playing",
+            (Situation::TakeSpeaker { phone_package }, Placement::Speaker) => format!(
+                "{} moves to the {speaker}, even when the laptop is playing",
                 friendly_name(phone_package)
             ),
-            (Situation::Handback { laptop_app }, Placement::Pebble) => format!(
-                "Phone audio stays on the Pebble when {} plays",
+            (Situation::Handback { laptop_app }, Placement::Speaker) => format!(
+                "Phone audio stays on the {speaker} when {} plays",
                 friendly_name(laptop_app)
             ),
             (Situation::Handback { laptop_app }, Placement::Phone) => format!(
                 "Phone audio goes back to the phone when {} plays",
                 friendly_name(laptop_app)
             ),
-            (Situation::Game { exe }, Placement::Pebble) => {
-                format!("Phone audio may use the Pebble while {exe} is open")
+            (Situation::Game { exe }, Placement::Speaker) => {
+                format!("Phone audio may use the {speaker} while {exe} is open")
             }
             (Situation::Game { exe }, Placement::Phone) => {
                 format!("Phone audio stays on the phone while {exe} is open")
@@ -138,7 +139,7 @@ impl Memory {
             self.keep_counts.remove(laptop_app);
             self.set_rule(
                 Situation::Handback { laptop_app: laptop_app.to_string() },
-                Placement::Pebble,
+                Placement::Speaker,
                 Learned::KeptRepeatedly,
                 at_ms,
             );
