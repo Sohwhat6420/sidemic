@@ -5,6 +5,7 @@
 
 mod adb;
 mod core;
+mod hang;
 mod log;
 mod mic;
 mod phone;
@@ -281,19 +282,27 @@ fn unload_idle_flyout(app: AppHandle) {
         .expect("unload thread");
 }
 
+// The core calls these two from its own thread. They are posted to the UI thread rather than waited on, so the
+// switching core keeps running even if the UI thread is ever stuck (16 Oct: it was, and the core stalled with it).
 pub fn set_tray_tooltip(app: &AppHandle, text: &str) {
-    if let Some(t) = app.tray_by_id("tray") {
-        let _ = t.set_tooltip(Some(text));
-    }
+    let (app2, text) = (app.clone(), text.to_owned());
+    let _ = app.run_on_main_thread(move || {
+        if let Some(t) = app2.tray_by_id("tray") {
+            let _ = t.set_tooltip(Some(&text));
+        }
+    });
 }
 
 /// The tray menu's Pause item, so its label can follow the state.
 struct PauseItem(MenuItem<tauri::Wry>);
 
 pub fn set_pause_label(app: &AppHandle, paused: bool) {
-    if let Some(p) = app.try_state::<PauseItem>() {
-        let _ = p.0.set_text(if paused { "Resume TRUE Phone Link" } else { "Pause TRUE Phone Link" });
-    }
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(p) = app2.try_state::<PauseItem>() {
+            let _ = p.0.set_text(if paused { "Resume TRUE Phone Link" } else { "Pause TRUE Phone Link" });
+        }
+    });
 }
 
 pub fn autostart_enabled(app: &AppHandle) -> bool {
@@ -335,6 +344,7 @@ fn main() {
         }
         return;
     }
+    let restarted = hang::wait_for_previous(&args);
     // Tauri's async runtime starts one worker per logical core (20 here) for a handful of async commands; two
     // are plenty.
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
@@ -344,7 +354,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app, "home")))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .invoke_handler(tauri::generate_handler![state, accent, act, open_window, flyout_height, hide_flyout])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let data = app.path().app_data_dir()?;
             log::init(data.join("logs"));
@@ -352,9 +362,16 @@ fn main() {
             log::line(format!(
                 "TRUE Phone Link {} started{}",
                 env!("CARGO_PKG_VERSION"),
-                if at_sign_in { " at sign-in" } else { "" }
+                if restarted {
+                    " again after the window stopped answering"
+                } else if at_sign_in {
+                    " at sign-in"
+                } else {
+                    ""
+                }
             ));
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));
+            hang::watch();
 
             // The flyout loads on the first tray click, not at sign-in, and unloads when left closed.
             unload_idle_flyout(handle.clone());
