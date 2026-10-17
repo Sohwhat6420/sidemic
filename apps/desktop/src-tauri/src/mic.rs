@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -44,13 +44,64 @@ pub fn spawn(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>
         .expect("mic thread");
 }
 
-const TARGET: usize = (RATE / 1000 * 40) as usize; // keep ~40 ms queued
-const HIGH: usize = TARGET * 2; // above this, gently speed up
-const PANIC: usize = TARGET * 5; // above this (a Wi-Fi burst), jump back to TARGET
+const TARGET: usize = (RATE / 1000 * 40) as usize; // keep at least ~40 ms queued
+const MAX_TARGET: usize = (RATE / 1000 * 300) as usize; // never more than 300 ms, however bursty the Wi-Fi
+
+/// How much to keep queued so the gaps between arrivals never empty the cable: 40 ms on a smooth link, or the
+/// longest gap of the last few seconds plus 20 ms. Some phones batch Wi-Fi traffic while the screen is off (a
+/// POCO X6 Pro on HyperOS delivered its audio in 150–200 ms bursts, measured 17 Oct 2026), and a fixed 40 ms
+/// queue then plays silence between every burst. Grows at once on a long gap, shrinks after 5 s without one.
+#[derive(Default)]
+struct Jitter {
+    gaps: VecDeque<(Instant, usize)>,
+    last: Option<Instant>,
+}
+
+impl Jitter {
+    fn arrived(&mut self, now: Instant) -> usize {
+        if let Some(last) = self.last {
+            let gap = ((now - last).as_micros() as usize * RATE as usize) / 1_000_000;
+            self.gaps.push_back((now, gap));
+        }
+        self.last = Some(now);
+        while self.gaps.front().is_some_and(|(t, _)| now - *t > Duration::from_secs(5)) {
+            self.gaps.pop_front();
+        }
+        let worst = self.gaps.iter().map(|(_, g)| *g).max().unwrap_or(0);
+        (worst + RATE as usize / 1000 * 20).clamp(TARGET, MAX_TARGET)
+    }
+}
+
+/// The playout side of `PhoneStream::take`, apart so it can be tested without a socket.
+fn play(q: &mut VecDeque<f32>, buffering: &mut bool, target: usize, n: usize, out: &mut Vec<f32>) {
+    if q.is_empty() && n > 0 {
+        *buffering = true;
+    }
+    if *buffering {
+        if q.len() < target {
+            return;
+        }
+        *buffering = false;
+    }
+    let fast = q.len() > target * 2;
+    let mut i = 0;
+    while out.len() < n {
+        let Some(s) = q.pop_front() else { break };
+        i += 1;
+        if fast && i % 200 == 0 {
+            continue;
+        }
+        out.push(s);
+    }
+}
 
 struct PhoneStream {
     ring: Arc<Mutex<VecDeque<f32>>>,
     alive: Arc<AtomicBool>,
+    /// The queue to keep, in samples (see `Jitter`).
+    target: Arc<AtomicUsize>,
+    /// Refilling to the target before playing again (at the start, and after running dry).
+    buffering: AtomicBool,
     sock: TcpStream,
 }
 
@@ -60,14 +111,18 @@ impl PhoneStream {
         sock.set_nodelay(true)?;
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RATE as usize)));
         let alive = Arc::new(AtomicBool::new(true));
-        let (r, a, mut s) = (ring.clone(), alive.clone(), sock.try_clone()?);
+        let target = Arc::new(AtomicUsize::new(TARGET));
+        let (r, a, t, mut s) = (ring.clone(), alive.clone(), target.clone(), sock.try_clone()?);
         thread::spawn(move || {
             let mut buf = [0u8; 960];
             let mut carry: Option<u8> = None;
+            let mut jitter = Jitter::default();
             loop {
                 match s.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        let target = jitter.arrived(Instant::now());
+                        t.store(target, Ordering::Relaxed);
                         let mut bytes: Vec<u8> = carry.take().into_iter().collect();
                         bytes.extend_from_slice(&buf[..n]);
                         if bytes.len() % 2 == 1 {
@@ -75,8 +130,9 @@ impl PhoneStream {
                         }
                         let mut q = r.lock().unwrap();
                         q.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0));
-                        if q.len() > PANIC {
-                            let drop = q.len() - TARGET;
+                        // Far more than a burst's worth queued (the link stalled and caught up): jump back.
+                        if q.len() > target * 5 {
+                            let drop = q.len() - target;
                             q.drain(..drop);
                         }
                     }
@@ -84,23 +140,20 @@ impl PhoneStream {
             }
             a.store(false, Ordering::SeqCst);
         });
-        Ok(PhoneStream { ring, alive, sock })
+        Ok(PhoneStream { ring, alive, target, buffering: AtomicBool::new(true), sock })
+    }
+
+    fn target(&self) -> usize {
+        self.target.load(Ordering::Relaxed)
     }
 
     /// Takes up to `n` samples, skipping one in 200 while the queue runs long (0.5 % faster, inaudible), so the
-    /// phone's and the laptop's clocks can't drift the delay upwards.
+    /// phone's and the laptop's clocks can't drift the delay upwards. After running dry it waits until the queue
+    /// is back up to the target, so a bursty link gives one short gap instead of a gap between every burst.
     fn take(&self, n: usize, out: &mut Vec<f32>) {
-        let mut q = self.ring.lock().unwrap();
-        let fast = q.len() > HIGH;
-        let mut i = 0;
-        while out.len() < n {
-            let Some(s) = q.pop_front() else { break };
-            i += 1;
-            if fast && i % 200 == 0 {
-                continue;
-            }
-            out.push(s);
-        }
+        let mut buffering = self.buffering.load(Ordering::Relaxed);
+        play(&mut self.ring.lock().unwrap(), &mut buffering, self.target(), n, out);
+        self.buffering.store(buffering, Ordering::Relaxed);
     }
 
     fn queued(&self) -> usize {
@@ -179,7 +232,7 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
             phone = None;
         }
         // The phone counts as live once audio actually arrives; until then the laptop mic covers.
-        let phone_live = phone.as_ref().is_some_and(|p| p.alive.load(Ordering::SeqCst) && (started || p.queued() >= TARGET));
+        let phone_live = phone.as_ref().is_some_and(|p| p.alive.load(Ordering::SeqCst) && (started || p.queued() >= p.target()));
         if phone_live {
             started = true;
             status.phone_failed.store(false, Ordering::Relaxed);
@@ -200,7 +253,7 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
         if use_laptop {
             if let Some(c) = laptop.as_ref() {
                 let _ = c.read(&mut spare);
-                if spare.len() > PANIC {
+                if spare.len() > TARGET * 5 {
                     let drop = spare.len() - TARGET;
                     spare.drain(..drop);
                 }
@@ -225,5 +278,81 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
         let source_q = phone.as_ref().map_or(spare.len(), |p| p.queued());
         status.delay_ms.store(((queued + source_q) as u32 * 1000) / RATE, Ordering::Relaxed);
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plays `secs` of a link that delivers `burst_ms` of audio every `burst_ms` (offset by a repeating
+    /// jitter pattern), pulling 5 ms every 5 ms like the cable loop. Returns the ms of audio that came up short
+    /// after the first second.
+    fn short_ms(burst_ms: u64, jitter_ms: &[u64], adaptive: bool, secs: u64) -> usize {
+        let per_ms = RATE as usize / 1000;
+        let start = Instant::now();
+        let mut jitter = Jitter::default();
+        let mut target = TARGET;
+        let (mut q, mut buffering, mut short) = (VecDeque::new(), true, 0);
+        let mut next_burst = 0u64;
+        let mut k = 0;
+        for ms in (0..secs * 1000).step_by(5) {
+            while next_burst <= ms {
+                let t = jitter.arrived(start + Duration::from_millis(next_burst));
+                if adaptive {
+                    target = t;
+                }
+                q.extend(std::iter::repeat(0.1f32).take(burst_ms as usize * per_ms));
+                next_burst += burst_ms + jitter_ms[k % jitter_ms.len()];
+                next_burst -= jitter_ms[(k + jitter_ms.len() - 1) % jitter_ms.len()];
+                k += 1;
+            }
+            let mut out = Vec::new();
+            play(&mut q, &mut buffering, target, 5 * per_ms, &mut out);
+            if ms >= 1000 {
+                short += 5 * per_ms - out.len();
+            }
+        }
+        short / per_ms
+    }
+
+    #[test]
+    fn a_smooth_link_keeps_the_40_ms_queue() {
+        let mut j = Jitter::default();
+        let t0 = Instant::now();
+        let mut target = 0;
+        for i in 0..500 {
+            target = j.arrived(t0 + Duration::from_millis(i * 10));
+        }
+        assert_eq!(target, TARGET);
+    }
+
+    #[test]
+    fn bursts_grow_the_queue_and_it_shrinks_after_5_s() {
+        let mut j = Jitter::default();
+        let t0 = Instant::now();
+        j.arrived(t0);
+        let grown = j.arrived(t0 + Duration::from_millis(190));
+        assert_eq!(grown, (190 + 20) * RATE as usize / 1000);
+        let mut t = 190;
+        let mut target = grown;
+        while t < 6000 {
+            t += 10;
+            target = j.arrived(t0 + Duration::from_millis(t));
+        }
+        assert_eq!(target, TARGET);
+        let capped = j.arrived(t0 + Duration::from_millis(t + 2000));
+        assert_eq!(capped, MAX_TARGET);
+    }
+
+    #[test]
+    fn screen_off_bursts_play_without_gaps() {
+        // The POCO X6 Pro with its screen off: ~180 ms bursts, arriving up to 40 ms early or late.
+        let pattern = [0, 30, 10, 40, 0, 20];
+        assert_eq!(short_ms(180, &pattern, true, 20), 0);
+        // The fixed 40 ms queue it replaces came up short whenever a burst arrived late.
+        let old = short_ms(180, &pattern, false, 20);
+        eprintln!("fixed 40 ms queue: {old} ms short in 19 s");
+        assert!(old > 0, "{old}");
     }
 }
