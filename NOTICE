@@ -6,3 +6,10 @@ licensed under the Apache License, Version 2.0:
   Copyright (C) 2018 Genymobile
   Copyright (C) 2018-2026 Romain Vimont
 Derived files say so in their headers (phone-server: FakeContext.java, Workarounds.java).
+
+The phone's voice chain links these, each under its own licence:
+  DeepFilterNet (https://github.com/Rikorose/DeepFilterNet), MIT or Apache-2.0, Copyright (c) Hendrik Schröter,
+    including its bundled DeepFilterNet 3 model.
+  nnnoiseless (https://github.com/jneem/nnnoiseless), BSD-3-Clause, a Rust port of RNNoise (Xiph.Org Foundation,
+    Jean-Marc Valin).
+  tract (https://github.com/sonos/tract), MIT or Apache-2.0, Copyright Sonos.

@@ -1,27 +1,308 @@
+<div align="center">
+
+<img src="docs/assets/icon.png" width="88" alt="TRUE Phone Link icon">
+
 # TRUE Phone Link
 
-Your Android phone as your PC's microphone, and your phone's media on your PC speakers, wirelessly, with
-nothing installed on the phone. A Rust + Tauri tray app drives a small server over wireless adb.
+**Your Android phone becomes your PC's microphone, and your phone's music plays on your PC speakers.**<br>
+Wireless, automatic, and nothing to install on the phone.
 
-Status: early development (private until v1).
+[![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](#requirements)
+[![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84?logo=android&logoColor=white)](#requirements)
+[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app/)
+[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+[![Status](https://img.shields.io/badge/status-live%20testing-orange)](#roadmap)
 
-## Layout
-- `phone-server/`: the on-phone server (Java, dexed, run by `app_process` as the shell user). It captures the
-  mic with `AudioRecord` and runs the voice chain **on the phone** (high-pass, presence, speech leveller with
-  expander, look-ahead limiter; DeepFilterNet planned), so the PC does no audio work while you game.
-  - `build.sh`: javac + d8, no Gradle. Needs JDK 17 and Android SDK platform 36 / build-tools 36.0.0.
-  - Modes: `probe`, `record` (A/B WAVs), `stream` (warm server on `localabstract:tpl_mic`).
+<img src="docs/assets/hero.png" alt="The TRUE Phone Link window and tray flyout on Windows 11" width="100%">
 
-## Run the phone server by hand
+[What it does](#what-it-does) ·
+[How it works](#how-it-works) ·
+[Getting started](#getting-started) ·
+[Numbers](#the-numbers) ·
+[Roadmap](#roadmap) ·
+[Build from source](#build-from-source)
+
+</div>
+
+---
+
+## Why
+
+Laptop microphones are bad, and the phone in your pocket has four good ones and a Snapdragon to clean them up.
+The apps that let you use it as a PC mic tend to show adverts, stop after an hour, or need you to open something
+on the phone every time.
+
+TRUE Phone Link sits in the Windows tray and just does it. When Discord or a game opens the mic, your phone's mic
+goes live; when it closes, it switches off. If you start music on your phone while the laptop is quiet, it moves to
+your PC speakers, and it moves back when you play something on the laptop. You don't touch either device.
+
+## What it does
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🎙️ Phone as your PC mic
+- Turns on by itself when any app starts listening, and off when it stops.
+- Noise removal runs **on the phone** (DeepFilterNet 3), so your PC spends nothing on it mid-game.
+- If the phone drops off, the laptop mic takes over, so you're never silent.
+
+</td>
+<td width="50%" valign="top">
+
+### 🔊 Phone audio on your PC speakers
+- Phone media plays through the PC's speakers over Bluetooth, with no re-pairing.
+- Short laptop sounds (a Discord ping) briefly duck the phone instead of taking over.
+- Real laptop media hands the speakers back, and the phone carries on playing on its own speaker.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧠 Smart auto that learns
+- Sensible defaults, not hard-coded rules.
+- Asks once per game whether phone audio may use the speakers, then remembers.
+- Every decision is listed with an **Undo**, and undoing it teaches it the other way.
+
+</td>
+<td width="50%" valign="top">
+
+### 🪶 Light enough to forget about
+- Idle in the tray: **one process, ~9 MB, 0.03% CPU**.
+- The flyout's web view loads on click and unloads after two minutes.
+- Follows your Windows accent colour, and shows your phone's own wallpaper.
+
+</td>
+</tr>
+</table>
+
+## Screenshots
+
+<table>
+<tr>
+<td align="center" width="36%"><img src="docs/assets/flyout.png" alt="Tray flyout"><br><sub><b>Tray flyout.</b> Click the icon: mic, speaker and Smart auto at a glance.</sub></td>
+<td align="center"><img src="docs/assets/page-home.png" alt="Home page"><br><sub><b>Home.</b> What it's doing, why, and what it did today.</sub></td>
+</tr>
+</table>
+
+<details>
+<summary><b>More screens</b></summary>
+<br>
+
+| Microphone | Phone audio |
+| :---: | :---: |
+| <img src="docs/assets/page-microphone.png" alt="Microphone page"> | <img src="docs/assets/page-audio.png" alt="Phone audio page"> |
+| **Smart auto** | **Connection** |
+| <img src="docs/assets/page-auto.png" alt="Smart auto page"> | <img src="docs/assets/page-connection.png" alt="Connection page"> |
+
+</details>
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph phone["📱 Android phone"]
+        direction TB
+        srv["tpl-server<br/><sub>app_process, shell user</sub>"]
+        dsp["Voice chain<br/><sub>DeepFilterNet 3 → leveller → limiter</sub>"]
+        media["Media watcher<br/><sub>what's playing, play / pause</sub>"]
+        srv --- dsp
+        srv --- media
+    end
+
+    subgraph pc["💻 Windows PC"]
+        direction TB
+        app["TRUE Phone Link<br/><sub>Rust + Tauri tray app</sub>"]
+        policy["Smart auto<br/><sub>pure Rust policy crate</sub>"]
+        cable["VB-CABLE<br/><sub>virtual mic</sub>"]
+        apps["Discord, games, Zoom"]
+        spk["PC speakers"]
+        app <--> policy
+        app --> cable --> apps
+    end
+
+    dsp -->|"mic audio over Wi-Fi (adb)"| app
+    media <-->|"events and commands over Wi-Fi (adb)"| app
+    phone -.->|"phone media over Bluetooth A2DP"| spk
+```
+
+- **No phone app.** The laptop pushes a small server to the phone over wireless adb and runs it as the shell
+  user with `app_process`, the same trick [scrcpy](https://github.com/Genymobile/scrcpy) uses. It stays warm, so
+  the mic starts without clipping your first word.
+- **Your apps never get reconfigured.** They use *CABLE Output* as their mic once, and TRUE Phone Link decides
+  what feeds it: the phone, or the laptop's own mic as a fallback.
+- **Phone media** uses Windows' own Bluetooth audio sink (`AudioPlaybackConnection`), which the app opens and
+  closes itself.
+- **Smart auto** is a separate crate with no I/O: events in, actions out, covered by 40 table-driven scenario cases.
+
+## Getting started
+
+> [!NOTE]
+> TRUE Phone Link is in a one-week live test on the author's own laptop and phone. There's no installer release
+> yet; until v1 you [build it from source](#build-from-source).
+
+### Requirements
+- **Windows 11** with Bluetooth (for phone audio on the PC speakers).
+- **[VB-CABLE](https://vb-audio.com/Cable/)**, the free virtual audio cable (donationware), used as the mic your apps
+  pick.
+- **adb** on the PC, from Android platform-tools (`winget install Google.PlatformTools`) or
+  [scrcpy](https://github.com/Genymobile/scrcpy) (`winget install Genymobile.scrcpy`); the app finds either.
+- **A 64-bit Android 12+ phone** with Developer options on. Tested on a Galaxy S24 Ultra (Android 16).
+- Phone and PC on the same **private** Wi-Fi.
+
+### One-time phone setup
+1. Turn on **Developer options**: <kbd>Settings</kbd> → <kbd>About phone</kbd> → <kbd>Software information</kbd>
+   → tap <kbd>Build number</kbd> seven times.
+2. Turn on <kbd>Developer options</kbd> → <kbd>Wireless debugging</kbd>, and add its Quick Settings tile.
+3. Pair once with `adb pair` (Developer options shows the code), and tick **Always allow on this network**.
+4. Samsung phones: turn off **Auto Blocker**, and turn on **Disable adb authorisation timeout**.
+
+### Then
+- Install and start TRUE Phone Link. It sits in the tray and starts with Windows.
+- In Discord or your game, set the input device to **CABLE Output** once.
+- That's it. After a phone restart, tap the **Wireless debugging** tile once and it reconnects.
+
+> [!IMPORTANT]
+> Right now **wireless debugging is the only way the PC reaches the phone.** That's what lets it run with no
+> phone app, but it means Developer options. An optional companion app that needs neither is planned for v1
+> (see the [roadmap](#roadmap)); the no-install route will stay.
+
+> [!CAUTION]
+> Wireless debugging gives any paired computer shell access to your phone. Only pair PCs you own, and only use it
+> on networks you trust, such as home Wi-Fi.
+
+<details>
+<summary><b>Troubleshooting</b></summary>
+<br>
+
+| The flyout says | What to do |
+| --- | --- |
+| *Tap Wireless debugging on your phone* | The phone restarted or changed Wi-Fi, which switches wireless debugging off. Tap the tile. |
+| *Allow this laptop on your phone* | Accept the prompt on the phone and tick **Always allow on this network**. Mesh Wi-Fi asks once per access point. |
+| *adb isn't installed* | Install platform-tools or scrcpy (see [Requirements](#requirements)), or point `TPL_ADB` at `adb.exe`. |
+| *Couldn't start on the phone* | It retries by itself. If it keeps failing, the log says why. |
+| Your friends hear nothing | In Discord or the game, the input device must be **CABLE Output**, not your laptop mic. |
+
+The app writes a plain-text log per day to `%APPDATA%\com.truephonelink.desktop\logs\`. If something looks
+wrong, right-click the tray icon and choose **Mark a problem now**; the moment is flagged in the log.
+
+</details>
+
+## The numbers
+
+All measured on the author's Acer Nitro laptop and Galaxy S24 Ultra in October 2026. Voice quality is Microsoft's
+[DNSMOS](https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS) score of the same spoken take, recorded raw
+and through the phone's voice chain.
+
+<table>
+<tr>
+<td valign="top">
+
+**Voice quality** (DNSMOS, 1–5, higher is better)
+
+| | Raw phone mic | TRUE Phone Link |
+| --- | :---: | :---: |
+| Speech | 1.24 | **3.14** |
+| Background | 1.17 | **3.90** |
+| Overall | 1.15 | **2.83** |
+| P.808 | 2.52 | **3.38** |
+
+</td>
+<td valign="top">
+
+**Cost and speed**
+
+| | |
+| --- | --- |
+| PC, idle in the tray | ~9 MB, 0.03% CPU |
+| PC, flyout open | ~107 MB |
+| Phone, idle | ~71 MB PSS, 0.2% of one core |
+| Phone, mic live | 39% of one core |
+| Mic delay, end to end | ~120 ms (32 ms on the phone) |
+
+</td>
+</tr>
+</table>
+
+The PC side once used ~800 MB and a whole core. [docs/efficiency.md](docs/efficiency.md) shows how that was found
+and fixed, one API call at a time.
+
+## Roadmap
+
+- [x] Phone mic with on-phone noise removal, laptop-mic fallback
+- [x] Phone media on the PC speakers, with hand-back and ducking
+- [x] Smart auto with Undo and per-game memory
+- [x] Tray flyout and full window, Windows accent and phone wallpaper
+- [x] Pause / Resume, and recovery if the window ever stops responding
+- [ ] One-week live test (in progress)
+- [ ] Home-screen control panel on the phone (a web app, nothing to install)
+- [ ] **Optional companion app** for v1: no Developer options, no tap after a phone restart, and a Quick
+      Settings tile
+- [ ] Bluetooth-tethering fallback when the phone's Wi-Fi is off
+- [ ] Reverse audio (PC sound to the phone or earbuds)
+- [ ] Signed installer and first public release
+
+## Build from source
+
+<details>
+<summary><b>Toolchain and commands</b></summary>
+<br>
+
+You need Rust (MSVC), Node 18+, JDK 17 and the Android SDK (`platforms;android-36`, `build-tools;36.0.0`, NDK 29),
+plus [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+
 ```bash
+# 1. The phone server (javac + d8, no Gradle)
 bash phone-server/build.sh
+
+# 2. The voice chain for the phone (DeepFilterNet 3, loaded over JNI)
+cargo ndk -t arm64-v8a build --release -p tpl-voice-jni
+cp target/aarch64-linux-android/release/libtpl_voice_jni.so phone-server/out/
+
+# 3. The Windows app and its installer
+cd apps/desktop
+npx @tauri-apps/cli@2 build
+
+# Smart auto's scenario tests
+cargo test -p tpl-policy
+```
+
+To try the phone server by hand:
+
+```bash
+adb shell mkdir -p /data/local/tmp/tpl
 adb push phone-server/out/tpl-server.jar /data/local/tmp/tpl/
 adb shell CLASSPATH=/data/local/tmp/tpl/tpl-server.jar app_process / com.truephonelink.server.Main mode=probe
 ```
 
-## Efficiency
-Idle in the tray it is one process using about 9 MB and 0.03% CPU; the popup's web view loads on click and unloads
-after 2 minutes. How that was measured and fixed (it started at ~800 MB and a busy core): `docs/efficiency.md`.
+</details>
+
+<details>
+<summary><b>Repository layout</b></summary>
+<br>
+
+| Path | What it is |
+| --- | --- |
+| `apps/desktop/` | The Windows tray app (Rust + Tauri 2). `src-tauri/src/core.rs` runs everything; `ui/` is the flyout and window |
+| `crates/policy/` | Smart auto: a pure state machine with scenario tests |
+| `crates/voice/` | The voice chain: DeepFilterNet 3 or RNNoise, leveller, look-ahead limiter |
+| `crates/voice-jni/` | The JNI bridge that runs the voice chain inside the phone server |
+| `crates/voice-bench/` | Offline A/B bench used to pick the chain |
+| `phone-server/` | The server run on the phone: mic capture, media watcher, wallpaper, control channel |
+| `docs/` | Write-ups, starting with [efficiency](docs/efficiency.md) |
+
+</details>
+
+## Credits
+
+- [scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0), whose `app_process` approach and some code the
+  phone server builds on; see [NOTICE](NOTICE).
+- [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) for speech enhancement, and
+  [VB-CABLE](https://vb-audio.com/Cable/) for the virtual mic.
+- Icons from Microsoft's [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
 
 ## Licence
-Apache-2.0. Parts of `phone-server` are derived from scrcpy (Apache-2.0); see `NOTICE`.
+
+[Apache-2.0](LICENSE).
