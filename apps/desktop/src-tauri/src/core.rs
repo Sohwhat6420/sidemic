@@ -32,6 +32,8 @@ pub enum Msg {
     Laptop(Event),
     Act { action: String, arg: Option<String> },
     MicNote(String),
+    /// Other phones adb can reach, as (phone id, model), for "Use this phone".
+    Phones(Vec<(String, String)>),
 }
 
 /// How far the phone link has got, for the hints under the phone's name.
@@ -112,6 +114,18 @@ struct Core {
     last_now: u64,
     pings: Vec<u32>,
     last_live: String,
+    /// What the phone said about itself in its hello.
+    phone: PhoneInfo,
+    /// Something the phone refused, explained for its brand (see `refusal_hint`).
+    phone_warning: Option<String>,
+    other_phones: Vec<(String, String)>,
+}
+
+#[derive(Default)]
+struct PhoneInfo {
+    model: String,
+    manufacturer: String,
+    bt_name: String,
 }
 
 pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
@@ -132,7 +146,11 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
     forward(prx, tx.clone(), Msg::Phone);
     {
         let (tx, ctl) = (tx.clone(), ctl.clone());
-        thread::Builder::new().name("tpl-adb".into()).spawn(move || adb_thread(tx, ctl, ptx, phone_dir)).unwrap();
+        let data_dir = data_dir.clone();
+        thread::Builder::new()
+            .name("tpl-adb".into())
+            .spawn(move || adb_thread(tx, ctl, ptx, phone_dir, data_dir))
+            .unwrap();
     }
 
     // Bluetooth audio from the phone.
@@ -183,6 +201,9 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
         last_now: 0,
         pings: Vec::new(),
         last_live: "off".into(),
+        phone: PhoneInfo::default(),
+        phone_warning: None,
+        other_phones: Vec::new(),
     };
     thread::Builder::new().name("tpl-core".into()).spawn(move || core.run(rx)).unwrap();
     Handle { tx, snapshot }
@@ -266,10 +287,18 @@ impl Core {
     fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Phone(ev) => match ev {
-                PhoneEvent::Hello { name, model } => {
-                    log::line(format!("phone said hello: {name} ({model})"));
-                    self.name = Some(if name.is_empty() { model } else { name });
+                PhoneEvent::Hello { name, model, manufacturer, android, bt_name } => {
+                    log::line(format!(
+                        "phone said hello: {name} ({manufacturer} {model}, Android {android}, Bluetooth name {bt_name:?})"
+                    ));
+                    self.name = Some(if name.is_empty() { model.clone() } else { name });
+                    self.phone = PhoneInfo { model, manufacturer, bt_name };
+                    self.phone_warning = None;
                     self.link_changed();
+                }
+                PhoneEvent::Refused { what, error } => {
+                    log::line(format!("phone refused {what}: {error}"));
+                    self.phone_warning = Some(refusal_hint(&self.phone.manufacturer, &what));
                 }
                 PhoneEvent::Battery { level, charging } => {
                     self.battery = Some(level);
@@ -325,6 +354,7 @@ impl Core {
                 self.mic_note = Some(n);
             }
             Msg::Act { action, arg } => self.act(&action, arg.as_deref()),
+            Msg::Phones(p) => self.other_phones = p,
         }
     }
 
@@ -366,7 +396,13 @@ impl Core {
             }
             Action::OpenA2dp => {
                 self.a2dp_error = None;
-                let hint = self.name.clone().unwrap_or_else(|| "Galaxy".into());
+                // Windows lists the phone under its Bluetooth name, which can differ from the name in Settings
+                // (on HyperOS it does by default), so that comes first.
+                let hint = [&self.phone.bt_name, self.name.as_ref().unwrap_or(&String::new()), &self.phone.model]
+                    .into_iter()
+                    .find(|s| !s.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "phone".into());
                 let _ = self.a2dp_tx.send(A2dpCmd::Open(hint));
             }
             Action::CloseA2dp => {
@@ -416,6 +452,15 @@ impl Core {
             self.save_settings();
         }
         match action {
+            "use_phone" => {
+                if let Some(id) = arg {
+                    *PICK.lock().unwrap() = Some(id.to_owned());
+                    self.name = None;
+                    self.wallpaper = None;
+                    self.phone = PhoneInfo::default();
+                    self.phone_warning = None;
+                }
+            }
             "mark" => {
                 let mut snap = self.snapshot.lock().unwrap().clone();
                 if let Some(o) = snap.as_object_mut() {
@@ -600,6 +645,8 @@ impl Core {
             "link_text": "Wi-Fi, wireless debugging",
             "hint": hint,
             "hint_long": hint_long,
+            "phone_warning": self.phone_warning,
+            "other_phones": self.other_phones.iter().map(|(id, model)| json!({"id": id, "model": model})).collect::<Vec<_>>(),
             "device": {"name": self.name},
             "battery": if connected { self.battery } else { None },
             "charging": self.charging,
@@ -655,6 +702,21 @@ fn speaker_name(endpoint: &str) -> String {
     }
 }
 
+/// What to say when the phone refuses something the shell user is normally allowed to do. Some brands put it
+/// behind a security switch of their own in Developer options.
+fn refusal_hint(manufacturer: &str, what: &str) -> String {
+    let m = manufacturer.to_lowercase();
+    let fix = if ["xiaomi", "redmi", "poco"].iter().any(|b| m.contains(b)) {
+        "On Xiaomi, Redmi and POCO phones, turn on Developer options → USB debugging (Security settings). \
+         The phone may ask for a SIM card and a Mi account the first time."
+    } else if ["oppo", "realme", "oneplus"].iter().any(|b| m.contains(b)) {
+        "On OPPO, realme and OnePlus phones, turn on Developer options → Disable permission monitoring."
+    } else {
+        "Look in Developer options for a security switch that limits USB debugging, and turn it on."
+    };
+    format!("The phone refused {what}. {fix}")
+}
+
 fn tooltip(connected: bool, hint: &str, live: &str, playing: &Option<String>, audio: Placement) -> String {
     let mut t = String::from("TRUE Phone Link");
     if !connected {
@@ -683,23 +745,78 @@ pub fn shutdown() {
     }
 }
 
-fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone_dir: PathBuf) {
+/// The phone this laptop uses, kept in `phone.json` so that a second phone on the same Wi-Fi is never taken over by
+/// itself, plus the address that last worked, for reconnecting when mDNS goes stale.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Remembered {
+    phone: Option<String>,
+    addr: Option<String>,
+}
+
+/// "Use this phone" from the Connection page; the adb thread picks it up.
+static PICK: Mutex<Option<String>> = Mutex::new(None);
+
+fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone_dir: PathBuf, data_dir: PathBuf) {
     let Some(adb) = Adb::find(None) else {
         let _ = tx.send(Msg::Link(Link::NoAdb));
         return;
     };
     adb.start_daemon();
     let adb = ADB.get_or_init(|| adb);
+    let file = data_dir.join("phone.json");
+    let mut mine: Remembered = fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let save = |m: &Remembered| {
+        if let Ok(s) = serde_json::to_string_pretty(m) {
+            let _ = fs::write(&file, s);
+        }
+    };
+    if let Ok(p) = std::env::var("TPL_PHONE") {
+        mine.phone = Some(p);
+    }
     let mut server: Option<(String, Child)> = None;
     let mut fails = 0;
+    let mut last_others = Vec::new();
+    let mut next_reconnect = Instant::now();
     loop {
+        if let Some(p) = PICK.lock().unwrap().take() {
+            if mine.phone.as_deref() != Some(p.as_str()) {
+                log::line(format!("phone picked from the Connection page: {p}"));
+                mine = Remembered { phone: Some(p), addr: None };
+                save(&mine);
+                if let Some((s, mut c)) = server.take() {
+                    adb.stop_server(&s);
+                    let _ = c.kill();
+                }
+                ctl.disconnect();
+            }
+        }
         if ctl.connected() {
             thread::sleep(Duration::from_secs(2));
             continue;
         }
-        match adb.device() {
+        let current = server.as_ref().map(|(s, _)| s.as_str());
+        let (state, others) = crate::adb::choose(&adb.devices(), mine.phone.as_deref(), current);
+        if others != last_others {
+            let _ = tx.send(Msg::Phones(others.clone()));
+            last_others = others;
+        }
+        match state {
             DeviceState::Ready(serial) => {
                 let _ = tx.send(Msg::Link(Link::Starting));
+                let id = crate::adb::phone_id(&serial);
+                if mine.phone.as_deref() != Some(id.as_str()) {
+                    log::line(format!("using phone {id} ({serial})"));
+                    mine.phone = Some(id);
+                    save(&mine);
+                }
+                if let Some(addr) = adb.address(&serial) {
+                    if mine.addr.as_deref() != Some(addr.as_str()) {
+                        log::line(format!("phone listens on {addr}"));
+                        mine.addr = Some(addr);
+                        save(&mine);
+                    }
+                }
                 let stale = match server.as_mut() {
                     Some((s, c)) => *s != serial || c.try_wait().ok().flatten().is_some(),
                     None => true,
@@ -738,6 +855,15 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                     let _ = c.kill();
                 }
                 let _ = tx.send(Msg::Link(Link::Missing));
+                // adb's mDNS auto-connect can hold on to a stale instance (HyperOS re-advertises on a new port
+                // and keeps the old one), so every 15 s try the advertised addresses and the last one that worked.
+                if let Some(phone) = mine.phone.as_deref().filter(|_| Instant::now() >= next_reconnect) {
+                    next_reconnect = Instant::now() + Duration::from_secs(15);
+                    let ok = adb.reconnect(phone, mine.addr.as_deref());
+                    if !ok.is_empty() {
+                        log::line(format!("reconnected to the phone directly at {}", ok.join(", ")));
+                    }
+                }
             }
         }
         thread::sleep(Duration::from_secs(2));
@@ -894,4 +1020,16 @@ fn diff(old: &mut BTreeSet<String>, new: BTreeSet<String>, tx: &Sender<Msg>, mk:
         let _ = tx.send(Msg::Laptop(mk(a.clone(), true)));
     }
     *old = new;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refusal_hint;
+
+    #[test]
+    fn refusals_name_the_brands_switch() {
+        assert!(refusal_hint("Xiaomi", "media control").contains("USB debugging (Security settings)"));
+        assert!(refusal_hint("OnePlus", "media control").contains("Disable permission monitoring"));
+        assert!(refusal_hint("samsung", "media control").starts_with("The phone refused media control."));
+    }
 }

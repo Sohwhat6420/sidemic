@@ -90,9 +90,39 @@ public final class Main {
         }
     }
 
+    /** Sources to fall back on, in order, when the asked-for one won't open on this phone. */
+    static final String[] FALLBACK_SOURCES = {"voice-recognition", "mic", "voice-communication", "camcorder"};
+
+    /**
+     * The asked-for source, else the first fallback that opens: not every phone's audio HAL supports every source
+     * (UNPROCESSED is often missing; some builds refuse VOICE_RECOGNITION in stereo), and a mic that works beats none.
+     */
     private static MicCapture open(Map<String, String> o) {
-        return new MicCapture(get(o, "source", "voice-recognition"), Integer.parseInt(get(o, "channels", "1")),
-                tri(o.get("ns")), tri(o.get("agc")), tri(o.get("aec")));
+        String want = get(o, "source", "voice-recognition");
+        int channels = Integer.parseInt(get(o, "channels", "1"));
+        RuntimeException first = null;
+        java.util.List<String> order = new java.util.ArrayList<>();
+        order.add(want);
+        for (String s : FALLBACK_SOURCES) {
+            if (!order.contains(s)) {
+                order.add(s);
+            }
+        }
+        for (String source : order) {
+            try {
+                MicCapture cap = new MicCapture(source, channels, tri(o.get("ns")), tri(o.get("agc")), tri(o.get("aec")));
+                if (!source.equals(want)) {
+                    Log.i("source " + want + " wouldn't open (" + first.getMessage() + "); using " + source);
+                }
+                return cap;
+            } catch (RuntimeException e) {
+                if (first == null) {
+                    first = e;
+                }
+                Log.d("source " + source + ": " + e);
+            }
+        }
+        throw first;
     }
 
     /**
@@ -238,6 +268,8 @@ public final class Main {
                 byte[] bytes = new byte[BLOCK_FRAMES * 2];
                 boolean first = true;
                 long blocks = 0;
+                boolean silenced = false;
+                int zeroBlocks = 0;
                 while (true) {
                     int n = cap.read(buf, buf.length);
                     if (n < 0) {
@@ -248,6 +280,18 @@ public final class Main {
                         Log.i("first audio " + (SystemClock.elapsedRealtime() - t0) + " ms after connect");
                         first = false;
                     }
+                    // Exact zeros never come from a real mic. Two seconds of them, or Android saying so, means the
+                    // phone is feeding silence (screen-off rules on some brands, a call, a privacy switch).
+                    zeroBlocks = allZero(buf, n) ? zeroBlocks + 1 : 0;
+                    if (blocks % 100 == 0 || zeroBlocks == 200) {
+                        boolean now = cap.silenced() || zeroBlocks >= 200;
+                        if (now != silenced) {
+                            Log.i(now ? "mic silenced by the phone (source=" + cap.sourceName + ", silenced flag="
+                                    + cap.silenced() + ")" : "mic audio is back");
+                            silenced = now;
+                        }
+                    }
+                    blocks++;
                     toMono(buf, frames, ch, mix, mono);
                     if (dsp != null) {
                         dsp.process(mono, frames);
@@ -258,7 +302,7 @@ public final class Main {
                         bytes[2 * i + 1] = (byte) (monoOut[i] >> 8);
                     }
                     os.write(bytes, 0, frames * 2);
-                    if (dsp instanceof Dsp && Log.debug && ++blocks % 100 == 0) {
+                    if (dsp instanceof Dsp && Log.debug && blocks % 100 == 0) {
                         Log.d(String.format("in %.1f dB, gain %.1f dB, limiter %.1f dB", ((Dsp) dsp).lastInputDb, ((Dsp) dsp).lastGainDb,
                                 ((Dsp) dsp).lastLimitDb));
                     }
@@ -279,6 +323,15 @@ public final class Main {
                 }
             }
         }
+    }
+
+    private static boolean allZero(short[] buf, int n) {
+        for (int i = 0; i < n; i++) {
+            if (buf[i] != 0) {
+                return false;
+            }
+        }
+        return n > 0;
     }
 
     /** Peak, RMS, clipped-sample count and (stereo) inter-channel correlation. */

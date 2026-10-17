@@ -14,7 +14,10 @@ use crate::adb::CTL_PORT;
 
 #[derive(Debug)]
 pub enum PhoneEvent {
-    Hello { name: String, model: String },
+    /// `bt_name` is what Windows lists the phone as under Bluetooth (older phone servers don't send it).
+    Hello { name: String, model: String, manufacturer: String, android: String, bt_name: String },
+    /// The phone refused something the shell user is normally allowed (some brands gate it behind a switch).
+    Refused { what: String, error: String },
     Battery { level: u32, charging: bool },
     Media { playing: bool, package: String, title: String },
     Volume(f64),
@@ -47,7 +50,14 @@ impl PhoneControl {
                     let Ok(j) = serde_json::from_str::<Value>(&line) else { continue };
                     let s = |k: &str| j.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
                     let ev = match j.get("t").and_then(Value::as_str) {
-                        Some("hello") => PhoneEvent::Hello { name: s("name"), model: s("model") },
+                        Some("hello") => PhoneEvent::Hello {
+                            name: s("name"),
+                            model: s("model"),
+                            manufacturer: s("manufacturer"),
+                            android: s("android"),
+                            bt_name: s("bt"),
+                        },
+                        Some("refused") => PhoneEvent::Refused { what: s("what"), error: s("error") },
                         Some("battery") => PhoneEvent::Battery {
                             level: j["level"].as_u64().unwrap_or(0) as u32,
                             charging: j["charging"].as_bool().unwrap_or(false),
@@ -74,6 +84,13 @@ impl PhoneControl {
 
     pub fn connected(&self) -> bool {
         self.sock.lock().unwrap().is_some()
+    }
+
+    /// Drops the connection (switching phones); the reader thread then reports `Gone`.
+    pub fn disconnect(&self) {
+        if let Some(s) = self.sock.lock().unwrap().take() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     fn send(&self, v: Value) {

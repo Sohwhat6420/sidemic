@@ -92,7 +92,8 @@ final class Serve {
             watcher.setDaemon(true);
             try {
                 send(new JSONObject().put("t", "hello").put("name", deviceName()).put("model", Build.MODEL)
-                        .put("android", Build.VERSION.RELEASE));
+                        .put("manufacturer", Build.MANUFACTURER).put("android", Build.VERSION.RELEASE)
+                        .put("bt", bluetoothName()));
                 watcher.start();
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                 String line;
@@ -114,6 +115,31 @@ final class Serve {
         }
 
         private void command(JSONObject c) throws IOException, JSONException {
+            try {
+                obey(c);
+            } catch (SecurityException e) {
+                // Some brands gate what the shell user may do behind their own switch (HyperOS: "USB debugging
+                // (Security settings)"); the laptop names it.
+                String cmd = c.optString("c");
+                refused("play".equals(cmd) || "pause".equals(cmd) ? "play/pause" : "volume changes", e);
+            }
+        }
+
+        private final java.util.Set<String> refusedOnce = java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+        /** Tells the laptop once per kind of refusal; the log keeps every one. */
+        private void refused(String what, Throwable e) {
+            Log.i("refused " + what + ": " + e);
+            if (refusedOnce.add(what)) {
+                try {
+                    send(new JSONObject().put("t", "refused").put("what", what).put("error", String.valueOf(e.getMessage())));
+                } catch (IOException | JSONException ignored) {
+                    // the laptop has gone; nothing to tell
+                }
+            }
+        }
+
+        private void obey(JSONObject c) throws IOException, JSONException {
             switch (c.optString("c")) {
                 case "play":
                     transport(true);
@@ -176,11 +202,19 @@ final class Serve {
                             lastBattery = b.toString();
                         }
                     }
-                    if (tick % 4 == 0) { // every 2 s; one binder call while it stays the same
-                        int id = wm.getWallpaperId(WallpaperManager.FLAG_LOCK);
-                        if (id != lastWallpaper) {
-                            lastWallpaper = id;
-                            byte[] jpeg = Wallpaper.jpeg(wm, WallpaperManager.FLAG_LOCK);
+                    if (tick % 4 == 0) { // every 2 s; one or two binder calls while it stays the same
+                        // A lock id of -1 means the lock screen shows the home wallpaper (no separate lock
+                        // wallpaper: the default on HyperOS and stock Android), so watch and read that one.
+                        int which = WallpaperManager.FLAG_LOCK;
+                        int id = wm.getWallpaperId(which);
+                        if (id < 0) {
+                            which = WallpaperManager.FLAG_SYSTEM;
+                            id = wm.getWallpaperId(which);
+                        }
+                        int key = id * 4 + which;
+                        if (key != lastWallpaper) {
+                            lastWallpaper = key;
+                            byte[] jpeg = Wallpaper.jpeg(wm, which);
                             if (jpeg != null) {
                                 send(new JSONObject().put("t", "wallpaper").put("id", id)
                                         .put("jpeg", Base64.encodeToString(jpeg, Base64.NO_WRAP)));
@@ -221,6 +255,9 @@ final class Serve {
                     }
                 }
                 return list.isEmpty() ? null : list.get(0);
+            } catch (SecurityException e) {
+                refused("reading what's playing", e);
+                return null;
             } catch (RuntimeException e) {
                 Log.d("media sessions: " + e);
                 return null;
@@ -261,14 +298,40 @@ final class Serve {
             out.flush();
         }
 
-        private static String deviceName() {
+        /**
+         * The name the phone shows other Bluetooth devices, which is what Windows lists it as. It can differ from
+         * the device name. Asks the adapter, then the secure setting; under app_process the adapter usually has
+         * no answer. While Bluetooth is off, HyperOS keeps an encoded blob in that setting (measured 17 Oct 2026),
+         * which is not a name. Empty when neither says.
+         */
+        private String bluetoothName() {
+            String n = null;
             try {
-                Process p = Runtime.getRuntime().exec(new String[] {"settings", "get", "global", "device_name"});
-                String s = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)).readLine();
-                return s == null || s.isEmpty() || "null".equals(s) ? Build.MODEL : s.trim();
-            } catch (IOException e) {
-                return Build.MODEL;
+                android.bluetooth.BluetoothManager bm =
+                        (android.bluetooth.BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+                n = bm == null || bm.getAdapter() == null ? null : bm.getAdapter().getName();
+            } catch (Throwable t) {
+                Log.d("bluetooth name: " + t);
             }
+            if (n == null || n.isEmpty()) {
+                n = setting("secure", "bluetooth_name");
+            }
+            return n == null || n.length() > 64 || n.matches("[A-Za-z0-9+/=]{40,}") ? "" : n;
+        }
+
+        private static String setting(String table, String key) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[] {"settings", "get", table, key});
+                String s = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)).readLine();
+                return s == null || s.isEmpty() || "null".equals(s) ? null : s.trim();
+            } catch (IOException e) {
+                return null;
+            }
+        }
+
+        private static String deviceName() {
+            String s = setting("global", "device_name");
+            return s == null ? Build.MODEL : s;
         }
     }
 }

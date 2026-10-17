@@ -46,16 +46,7 @@ final class Wallpaper {
 
     /** A small JPEG of one wallpaper (lock or home) for the laptop UI, or null when the phone won't hand it over. */
     static byte[] jpeg(WallpaperManager wm, int which) throws IOException {
-        ParcelFileDescriptor pfd = wm.getWallpaperFile(which);
-        if (pfd == null) {
-            return null;
-        }
-        Bitmap b;
-        try {
-            b = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
-        } finally {
-            pfd.close();
-        }
+        Bitmap b = picture(wm, which);
         if (b == null) {
             return null;
         }
@@ -66,18 +57,77 @@ final class Wallpaper {
         return out.toByteArray();
     }
 
+    /**
+     * The wallpaper's picture, by the first route that works:
+     * 1. the wallpaper file (a static picture, or on Samsung the picture a live wallpaper animates);
+     * 2. the phone's built-in wallpaper, while that is still the one in use (a fresh HyperOS phone keeps its
+     *    default as a resource, so there is no file); checked by comparing its colours with the wallpaper's;
+     * 3. a gradient of the wallpaper's own colours, so the phone picture at least looks like the phone.
+     */
+    static Bitmap picture(WallpaperManager wm, int which) throws IOException {
+        ParcelFileDescriptor pfd = wm.getWallpaperFile(which);
+        if (pfd != null) {
+            try {
+                Bitmap b = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+                if (b != null) {
+                    return b;
+                }
+            } finally {
+                pfd.close();
+            }
+        }
+        WallpaperColors colours = null;
+        try {
+            colours = wm.getWallpaperColors(which);
+        } catch (Throwable t) {
+            Log.d("wallpaper colours: " + t);
+        }
+        if (colours == null) {
+            return null;
+        }
+        try {
+            Drawable d = wm.getBuiltInDrawable(which);
+            if (d != null && sameColour(WallpaperColors.fromDrawable(d).getPrimaryColor(), colours.getPrimaryColor())) {
+                return bitmap(d);
+            }
+        } catch (Throwable t) {
+            Log.d("built-in wallpaper: " + t);
+        }
+        return gradient(colours);
+    }
+
+    private static boolean sameColour(Color a, Color b) {
+        int x = a.toArgb();
+        int y = b.toArgb();
+        return Math.abs(Color.red(x) - Color.red(y)) + Math.abs(Color.green(x) - Color.green(y))
+                + Math.abs(Color.blue(x) - Color.blue(y)) < 24;
+    }
+
+    private static Bitmap gradient(WallpaperColors c) {
+        int top = c.getPrimaryColor().toArgb();
+        int bottom = (c.getSecondaryColor() != null ? c.getSecondaryColor() : c.getPrimaryColor()).toArgb();
+        Bitmap b = Bitmap.createBitmap(360, 780, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(b);
+        android.graphics.Paint p = new android.graphics.Paint();
+        p.setShader(new android.graphics.LinearGradient(0, 0, 0, 780, top, bottom, android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, 360, 780, p);
+        return b;
+    }
+
+    private static Bitmap bitmap(Drawable d) {
+        if (d instanceof BitmapDrawable && ((BitmapDrawable) d).getBitmap() != null) {
+            return ((BitmapDrawable) d).getBitmap();
+        }
+        Bitmap b = Bitmap.createBitmap(Math.max(1, d.getIntrinsicWidth()), Math.max(1, d.getIntrinsicHeight()), Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        d.setBounds(0, 0, c.getWidth(), c.getHeight());
+        d.draw(c);
+        return b;
+    }
+
     /** Writes a thumbnail of one wallpaper (lock or home). Returns false when the phone won't hand it over. */
     static boolean export(WallpaperManager wm, int which, String path) throws IOException {
-        ParcelFileDescriptor pfd = wm.getWallpaperFile(which);
-        if (pfd == null) {
-            return false;
-        }
-        Bitmap b;
-        try {
-            b = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
-        } finally {
-            pfd.close();
-        }
+        Bitmap b = picture(wm, which);
         if (b == null) {
             return false;
         }
@@ -127,9 +177,22 @@ final class Wallpaper {
                 Log.i(n + " getDrawable: " + (d == null ? "null" : d.getIntrinsicWidth() + "x" + d.getIntrinsicHeight()));
                 if (d != null) {
                     save(d, out + "-" + n + ".png");
+                    continue;
                 }
             } catch (Throwable t) {
                 Log.i(n + " getDrawable: " + t);
+            }
+            try {
+                Drawable d = wm.getBuiltInDrawable(which[i]);
+                Log.i(n + " built-in: " + (d == null ? "null" : d.getIntrinsicWidth() + "x" + d.getIntrinsicHeight()
+                        + " colour " + hex(WallpaperColors.fromDrawable(d).getPrimaryColor())));
+                Bitmap b = picture(wm, which[i]);
+                if (b != null) {
+                    Log.i(n + " fallback picture: " + b.getWidth() + "x" + b.getHeight());
+                    save(b, out + "-" + n + ".png");
+                }
+            } catch (Throwable t) {
+                Log.i(n + " built-in: " + t);
             }
         }
     }

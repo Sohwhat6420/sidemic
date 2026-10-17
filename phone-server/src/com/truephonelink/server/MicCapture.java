@@ -3,6 +3,7 @@ package com.truephonelink.server;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
+import android.media.AudioRecordingConfiguration;
 import android.media.MediaRecorder;
 import android.media.MicrophoneInfo;
 import android.media.audiofx.AcousticEchoCanceler;
@@ -46,6 +47,7 @@ final class MicCapture {
         }
         record = builder.build();
         if (record.getState() != AudioRecord.STATE_INITIALIZED) {
+            record.release();
             throw new IllegalStateException("AudioRecord did not initialise for source " + sourceName);
         }
         int session = record.getAudioSessionId();
@@ -80,6 +82,19 @@ final class MicCapture {
             }
         } catch (IOException e) {
             Log.d("getActiveMicrophones failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * True while Android feeds this recording silence instead of the mic: another app with a higher claim took it
+     * (a phone call, an assistant), or a privacy rule applies. The stream keeps running and recovers by itself.
+     */
+    boolean silenced() {
+        try {
+            AudioRecordingConfiguration c = record.getActiveRecordingConfiguration();
+            return c != null && c.isClientSilenced();
+        } catch (Throwable t) {
+            return false;
         }
     }
 

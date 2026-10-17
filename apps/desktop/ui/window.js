@@ -64,8 +64,11 @@ start((s) => {
         `<div>${esc(r.text)}</div><div><span class="link" data-act="forget_rule" data-arg="${esc(r.key)}">Forget</span></div></div>`).join("")
     : `<div class="empty">Nothing yet. When you correct it, or answer a question about a game, it remembers here.</div>`;
 
-  $("conn-info").innerHTML = s.connected ? "" :
-    `<div class="info">${icon("info_20_regular")}<div class="sub">${esc(s.hint_long)}</div></div>`;
+  const note = !s.connected ? s.hint_long : s.phone_warning;
+  $("conn-info").innerHTML = note ? `<div class="info">${icon("info_20_regular")}<div class="sub">${esc(note)}</div></div>` : "";
+  $("conn-phones").innerHTML = (s.other_phones || []).map((p) =>
+    `<div class="card">${icon("phone_20_regular")}<div class="body">${esc(p.model)}<div class="sub">Also reachable over wireless debugging</div></div>` +
+    `<div class="right"><span class="link" data-act="use_phone" data-arg="${esc(p.id)}">Use this phone</span></div></div>`).join("");
   $("conn-link").textContent = s.connected ? s.link_text : "Not connected";
   $("conn-ping").textContent = s.ping_ms != null ? `${s.ping_ms} ms` : "";
   $("conn-bt").textContent = s.audio.available ? `Bluetooth, to ${s.audio.speaker}` : "Bluetooth audio isn't available (is the phone paired with this laptop?)";
