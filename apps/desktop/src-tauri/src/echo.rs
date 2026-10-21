@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aec3::api::config::EchoCanceller3Config;
 use aec3::nodes::audio::AudioFormat;
 use aec3::pipelines::linear::{self, LinearPipeline};
 
@@ -93,6 +94,30 @@ impl Timeline {
             *o = if j >= 0 && (j as usize) < self.buf.len() { self.buf[j as usize] } else { 0.0 };
         }
     }
+}
+
+/// AEC3 tuned to cut his voice less while both talk. Through a small speaker and a room, the echo only correlates
+/// 0.66–0.85 with what was played (no clock drift: under 0.2 ms over 10 s), so the linear filter removes only
+/// ~10 dB and the suppressor does the rest, which is what cuts a voice talking over the echo. Swept offline on the
+/// POCO's recording of the Pebble with a second voice mixed in (21 Oct 2026); against the defaults this has the
+/// worst half second of voice at −22 dB instead of −38 and 3 dropouts instead of 5, for echo left at −38…−42 dB
+/// instead of −48…−63 (from −25 with none). Longer filters and higher ERLE limits made no difference. Live, his voice
+/// stayed at −25…−30 dBFS under the clip (defaults: −56…−77) and the echo alone came through at −35…−45 (defaults:
+/// −60…−75); he chose his voice over the echo, with Discord's own echo cancellation on top.
+fn config() -> EchoCanceller3Config {
+    let mut c = EchoCanceller3Config::default();
+    let dn = &mut c.suppressor.dominant_nearend_detection;
+    // Call it "he is talking" sooner and hold that longer.
+    dn.enr_threshold = 2.0;
+    dn.snr_threshold = 5.0;
+    dn.trigger_threshold = 2;
+    dn.hold_duration = 100;
+    // While he is talking, suppress a quarter as readily.
+    for m in [&mut c.suppressor.nearend_tuning.mask_lf, &mut c.suppressor.nearend_tuning.mask_hf] {
+        m.enr_transparent *= 4.0;
+        m.enr_suppress *= 4.0;
+    }
+    c
 }
 
 /// Records the default speaker for as long as it lives.
@@ -178,6 +203,7 @@ impl Canceller {
         let format = AudioFormat::ten_ms(RATE, 1);
         // The phone already removes noise and levels the voice: echo cancelling only.
         let pipe = linear::builder(format, format)
+            .aec3_config(config())
             .enable_noise_suppression(false)
             .enable_gain_controller2(false)
             .export_metrics(true)
