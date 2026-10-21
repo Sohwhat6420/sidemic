@@ -5,6 +5,7 @@
 
 mod adb;
 mod core;
+mod echo;
 mod hang;
 mod log;
 mod mic;

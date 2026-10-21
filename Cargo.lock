@@ -9,6 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aec3"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95b94681e57494d8d3933597fbf49c3537be1f2f33647e41317aab3dfc3d6fc8"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "num-complex",
+ "rustfft",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4663,6 +4675,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 name = "tpl-desktop"
 version = "0.1.0"
 dependencies = [
+ "aec3",
  "base64 0.22.1",
  "serde",
  "serde_json",

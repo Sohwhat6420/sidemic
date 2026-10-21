@@ -8,6 +8,7 @@ use windows::Win32::Media::Audio::*;
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 
 pub const RATE: u32 = 48_000;
@@ -70,14 +71,28 @@ fn float_format(channels: u16) -> WAVEFORMATEXTENSIBLE {
     }
 }
 
+/// The performance counter in 100 ns units: the clock WASAPI stamps captured packets with.
+pub fn qpc_100ns() -> u64 {
+    let (mut c, mut f) = (0i64, 1i64);
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut c);
+        let _ = QueryPerformanceFrequency(&mut f);
+    }
+    (c as i128 * 10_000_000 / f.max(1) as i128) as u64
+}
+
 fn open_client(d: &IMMDevice, buffer_ms: i64) -> Result<IAudioClient> {
+    open_client_flags(d, buffer_ms, 0)
+}
+
+fn open_client_flags(d: &IMMDevice, buffer_ms: i64, extra: u32) -> Result<IAudioClient> {
     unsafe {
         let client: IAudioClient = d.Activate(CLSCTX_ALL, None)?;
         // Windows converts our 48 kHz float stereo to whatever the device runs at.
         let fmt = float_format(2);
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY | extra,
             buffer_ms * 10_000,
             0,
             &fmt as *const _ as *const WAVEFORMATEX,
@@ -152,6 +167,40 @@ impl Capture {
             let capture: IAudioCaptureClient = client.GetService()?;
             client.Start()?;
             Ok(Capture { client, capture })
+        }
+    }
+
+    /// Records what a speaker is playing (WASAPI loopback). Windows sends nothing at all while nothing plays.
+    pub fn open_loopback(d: &IMMDevice) -> Result<Capture> {
+        unsafe {
+            let client = open_client_flags(d, 40, AUDCLNT_STREAMFLAGS_LOOPBACK)?;
+            let capture: IAudioCaptureClient = client.GetService()?;
+            client.Start()?;
+            Ok(Capture { client, capture })
+        }
+    }
+
+    /// Like `read`, but one call per packet with the time its first sample was captured (`qpc_100ns` clock).
+    pub fn read_timed(&self, mut each: impl FnMut(u64, &[f32])) -> Result<()> {
+        let mut mono = Vec::new();
+        unsafe {
+            loop {
+                if self.capture.GetNextPacketSize()? == 0 {
+                    return Ok(());
+                }
+                let mut data = std::ptr::null_mut();
+                let (mut frames, mut flags, mut qpc) = (0u32, 0u32, 0u64);
+                self.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, Some(&mut qpc))?;
+                mono.clear();
+                if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
+                    mono.resize(frames as usize, 0.0);
+                } else {
+                    let s = std::slice::from_raw_parts(data as *const f32, frames as usize * 2);
+                    mono.extend(s.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])));
+                }
+                self.capture.ReleaseBuffer(frames)?;
+                each(qpc, &mono);
+            }
         }
     }
 

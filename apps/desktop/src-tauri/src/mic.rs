@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Media::Audio::{eCapture, eRender};
 
 use crate::adb::MIC_PORT;
+use crate::echo;
 use crate::wasapi::{self, Capture, Render, RATE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +124,10 @@ impl PhoneStream {
             let mut buf = [0u8; 960];
             let mut carry: Option<u8> = None;
             let mut jitter = Jitter::default();
+            // TPL_NO_AEC=1 turns echo cancelling off (for A/B measurements).
+            wasapi::com_init();
+            let mut aec = if std::env::var_os("TPL_NO_AEC").is_none() { echo::Canceller::new() } else { None };
+            let (mut samples, mut clean) = (Vec::new(), Vec::new());
             loop {
                 match s.read(&mut buf) {
                     Ok(0) | Err(_) => break,
@@ -134,8 +139,18 @@ impl PhoneStream {
                         if bytes.len() % 2 == 1 {
                             carry = bytes.pop();
                         }
+                        samples.clear();
+                        samples.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0));
+                        let arrived = match aec.as_mut() {
+                            Some(aec) => {
+                                clean.clear();
+                                aec.process(&samples, &mut clean);
+                                &clean
+                            }
+                            None => &samples,
+                        };
                         let mut q = r.lock().unwrap();
-                        q.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0));
+                        q.extend(arrived);
                         // Far more than a burst's worth queued (the link stalled and caught up): jump back.
                         if q.len() > target * 5 {
                             let drop = q.len() - target;

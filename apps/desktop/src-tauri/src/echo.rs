@@ -1,0 +1,298 @@
+//! Echo cancelling for the phone mic. The phone usually sits by the laptop's speakers, so it hears the call and the
+//! game and sends them back: friends heard themselves (21 Oct 2026). WebRTC's AEC3 (the `aec3` crate) takes out
+//! whatever the default speaker played, using a WASAPI loopback recording of it as the reference.
+//!
+//! It runs on the laptop, on the phone audio as it arrives and before the jitter queue, because the queue skips
+//! and pauses samples and the canceller needs one unbroken timeline. Measured 21 Oct on a spoken clip through the
+//! Pebble: the echo was −25 dB (as loud as speech); AEC3 on the phone's own timeline took it to −41…−76 dB, but
+//! after the queue's skips only to −36 dB. It costs ~3 % of one laptop core.
+//!
+//! Lining the two up: both streams are counted in 48 kHz samples on the laptop's performance counter. Phone sample
+//! `k` is paired with the speaker sample at `anchor + k`, where the anchor is the earliest any phone audio has
+//! arrived (arrival − samples so far, the minimum over 20 s) less `LEAD`. That pairs each phone sample with
+//! speaker audio from a little before the phone could have heard it, which is the order AEC3 needs; AEC3 itself
+//! finds the remaining delay (phone latency + speaker latency, ~50–150 ms). The phone's and the laptop's clocks
+//! drift apart slowly, so the anchor follows the minimum when it moves by more than `REANCHOR`.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use aec3::nodes::audio::AudioFormat;
+use aec3::pipelines::linear::{self, LinearPipeline};
+
+use crate::log;
+use crate::wasapi::{self, Capture, RATE};
+
+const MS: i64 = RATE as i64 / 1000;
+const FRAME: usize = RATE as usize / 100; // AEC3 works in 10 ms frames
+const KEEP: usize = RATE as usize * 3; // speaker history kept
+const LEAD: i64 = 20 * MS;
+const REANCHOR: i64 = 25 * MS;
+/// With no loopback packet for this long, the speaker is taken to be silent up to this long ago.
+const IDLE: i64 = 30 * MS;
+/// A frame waits at most this long for the speaker recording to catch up, then goes through as it is.
+const MAX_WAIT: Duration = Duration::from_millis(60);
+
+fn now_idx() -> i64 {
+    idx(wasapi::qpc_100ns())
+}
+
+fn idx(qpc_100ns: u64) -> i64 {
+    (qpc_100ns as i128 * RATE as i128 / 10_000_000) as i64
+}
+
+/// What the default speaker played, by sample index on the performance-counter clock.
+#[derive(Default)]
+struct Timeline {
+    start: i64,
+    buf: VecDeque<f32>,
+    last_packet: i64,
+}
+
+impl Timeline {
+    fn end(&self) -> i64 {
+        self.start + self.buf.len() as i64
+    }
+
+    fn write(&mut self, at: i64, s: &[f32]) {
+        self.last_packet = now_idx();
+        if self.buf.is_empty() || at > self.end() + KEEP as i64 {
+            self.buf.clear();
+            self.start = at;
+        }
+        let end = self.end();
+        let skip = if at < end { (end - at) as usize } else { 0 };
+        if at > end {
+            self.buf.extend(std::iter::repeat(0.0).take((at - end) as usize));
+        }
+        if skip < s.len() {
+            self.buf.extend(&s[skip..]);
+        }
+        if self.buf.len() > KEEP {
+            let drop = self.buf.len() - KEEP;
+            self.buf.drain(..drop);
+            self.start += drop as i64;
+        }
+    }
+
+    /// How far the speaker is known: what has been recorded, or, while nothing plays, up to `IDLE` ago.
+    fn known(&self, now: i64) -> i64 {
+        if now - self.last_packet > IDLE {
+            self.end().max(now - IDLE)
+        } else {
+            self.end()
+        }
+    }
+
+    fn read(&self, at: i64, out: &mut [f32]) {
+        for (i, o) in out.iter_mut().enumerate() {
+            let j = at + i as i64 - self.start;
+            *o = if j >= 0 && (j as usize) < self.buf.len() { self.buf[j as usize] } else { 0.0 };
+        }
+    }
+}
+
+/// Records the default speaker for as long as it lives.
+pub struct SpeakerTap {
+    timeline: Arc<Mutex<Timeline>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl SpeakerTap {
+    pub fn start() -> SpeakerTap {
+        let timeline = Arc::new(Mutex::new(Timeline::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (t, s) = (timeline.clone(), stop.clone());
+        thread::Builder::new()
+            .name("tpl-speaker".into())
+            .spawn(move || {
+                wasapi::com_init();
+                let mut tap: Option<(Capture, String)> = None;
+                let mut checked = Instant::now();
+                while !s.load(Ordering::Relaxed) {
+                    // The default speaker can change (Pebble unplugged): follow it every 2 s.
+                    if checked.elapsed() > Duration::from_secs(2) {
+                        checked = Instant::now();
+                        let now = wasapi::default_render().map(|(_, n)| n).ok();
+                        if tap.as_ref().map(|(_, n)| n) != now.as_ref() {
+                            tap = None;
+                        }
+                    }
+                    if tap.is_none() {
+                        tap = wasapi::default_render()
+                            .and_then(|(d, n)| Capture::open_loopback(&d).map(|c| (c, n)))
+                            .ok();
+                        if tap.is_none() {
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
+                    }
+                    let ok = tap
+                        .as_ref()
+                        .unwrap()
+                        .0
+                        .read_timed(|qpc, s| t.lock().unwrap().write(idx(qpc), s))
+                        .is_ok();
+                    if !ok {
+                        tap = None;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .expect("speaker thread");
+        SpeakerTap { timeline, stop }
+    }
+}
+
+impl Drop for SpeakerTap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Takes the speaker out of the phone's audio, as it arrives. Lives on the phone stream's reader thread (AEC3's
+/// pipeline isn't `Send`, so it is made there too).
+pub struct Canceller {
+    pipe: LinearPipeline,
+    tap: SpeakerTap,
+    anchor: Option<i64>,
+    /// Phone samples handed to AEC3 so far.
+    k: i64,
+    pending: VecDeque<f32>,
+    waiting_since: Option<Instant>,
+    /// (when, arrival index − phone samples so far) over the last 20 s.
+    lows: VecDeque<(Instant, i64)>,
+    render: Vec<f32>,
+    frame: Vec<f32>,
+    out: Vec<f32>,
+    reanchors: u32,
+    metrics: Option<aec3::api::control::Metrics>,
+    last_report: Instant,
+}
+
+impl Canceller {
+    pub fn new() -> Option<Canceller> {
+        let format = AudioFormat::ten_ms(RATE, 1);
+        // The phone already removes noise and levels the voice: echo cancelling only.
+        let pipe = linear::builder(format, format)
+            .enable_noise_suppression(false)
+            .enable_gain_controller2(false)
+            .export_metrics(true)
+            .build();
+        match pipe {
+            Ok(pipe) => Some(Canceller {
+                pipe,
+                tap: SpeakerTap::start(),
+                anchor: None,
+                k: 0,
+                pending: VecDeque::new(),
+                waiting_since: None,
+                lows: VecDeque::new(),
+                render: vec![0.0; FRAME],
+                frame: vec![0.0; FRAME],
+                out: vec![0.0; FRAME],
+                reanchors: 0,
+                metrics: None,
+                last_report: Instant::now(),
+            }),
+            Err(e) => {
+                log::line(format!("echo cancelling unavailable: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Phone samples that arrived just now in; echo-cancelled samples out (whole 10 ms frames, so a few ms may
+    /// wait for the next call).
+    pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        let now = now_idx();
+        let t = Instant::now();
+        self.pending.extend(input);
+        let offset = now - (self.k + self.pending.len() as i64);
+        self.lows.push_back((t, offset));
+        while self.lows.front().is_some_and(|(w, _)| t - *w > Duration::from_secs(20)) {
+            self.lows.pop_front();
+        }
+        let base = self.lows.iter().map(|(_, o)| *o).min().unwrap_or(offset) - LEAD;
+        match self.anchor {
+            None => self.anchor = Some(base),
+            Some(a) if (a - base).abs() > REANCHOR => {
+                self.anchor = Some(base);
+                self.reanchors += 1;
+                log::line(format!("echo cancelling: realigned by {} ms", (base - a) / MS));
+            }
+            _ => {}
+        }
+        let anchor = self.anchor.unwrap();
+
+        while self.pending.len() >= FRAME {
+            let at = anchor + self.k;
+            let known = self.tap.timeline.lock().unwrap().known(now);
+            if at + FRAME as i64 > known {
+                // The speaker recording is a few ms behind: wait for it, but never hold the mic back for long.
+                let since = *self.waiting_since.get_or_insert(t);
+                if since.elapsed() < MAX_WAIT {
+                    break;
+                }
+            }
+            self.waiting_since = None;
+            self.tap.timeline.lock().unwrap().read(at, &mut self.render);
+            for (f, s) in self.frame.iter_mut().zip(self.pending.drain(..FRAME)) {
+                *f = s;
+            }
+            let ok = self.pipe.handle_render_frame(&self.render).is_ok()
+                && self.pipe.process_capture_frame(&self.frame, &mut self.out).unwrap_or(false);
+            output.extend_from_slice(if ok { &self.out } else { &self.frame });
+            self.k += FRAME as i64;
+        }
+
+        // Drained every time so the metrics queue can't fill and stall the pipeline (only `metrics` is kept).
+        while let Ok(Some(m)) = self.pipe.try_pull_metrics() {
+            self.metrics = Some(*m.payload());
+        }
+        if self.last_report.elapsed() > Duration::from_secs(60) {
+            self.last_report = Instant::now();
+            if let Some(m) = self.metrics {
+                log::line(format!(
+                    "echo cancelling: delay {} ms, echo return loss {:.0} dB, removed {:.0} dB, realigned {}×",
+                    m.delay_ms, m.echo_return_loss, m.echo_return_loss_enhancement, self.reanchors
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_speaker_timeline_fills_gaps_with_silence_and_skips_overlaps() {
+        let mut t = Timeline::default();
+        t.write(1000, &[1.0; 10]);
+        t.write(1015, &[2.0; 5]); // 5 samples of silence between
+        t.write(1018, &[3.0; 4]); // overlaps the last 2: only the new 2 are kept
+        assert_eq!(t.end(), 1022);
+        let mut out = [9.0; 26];
+        t.read(998, &mut out);
+        assert_eq!(&out[..2], &[0.0, 0.0]); // before the start
+        assert_eq!(&out[2..12], &[1.0; 10]);
+        assert_eq!(&out[12..17], &[0.0; 5]);
+        assert_eq!(&out[17..22], &[2.0; 5]);
+        assert_eq!(&out[22..24], &[3.0; 2]);
+        assert_eq!(&out[24..], &[0.0; 2]); // not recorded yet
+    }
+
+    #[test]
+    fn the_speaker_timeline_keeps_three_seconds() {
+        let mut t = Timeline::default();
+        for i in 0..400 {
+            t.write(i * FRAME as i64, &[0.5; FRAME]);
+        }
+        assert_eq!(t.buf.len(), KEEP);
+        assert_eq!(t.end(), 400 * FRAME as i64);
+    }
+}

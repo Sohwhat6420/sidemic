@@ -46,10 +46,23 @@ impl Listed {
 
 /// Parses `adb devices`. Columns are tab-separated, and mDNS serials can contain spaces: when a phone re-advertises
 /// itself (HyperOS does after every Wireless debugging restart) adb names the new instance `adb-X-y (2)._adb-...`.
+/// `adb devices -l` pads with spaces instead (adb 36, measured 21 Oct 2026), so without a tab the serial is
+/// everything before the first state word.
 pub fn parse_devices(out: &str) -> Vec<Listed> {
+    const STATES: &[&str] =
+        &["device", "offline", "unauthorized", "authorizing", "connecting", "recovery", "sideload", "bootloader", "rescue", "unknown"];
     out.lines()
         .filter_map(|line| {
-            let (serial, rest) = line.split_once('\t')?;
+            let (serial, rest) = match line.split_once('\t') {
+                Some(split) => split,
+                None => {
+                    let at = line.match_indices(' ').map(|(i, _)| i).find(|&i| {
+                        let next = line[i..].trim_start();
+                        STATES.iter().any(|s| next == *s || next.strip_prefix(s).is_some_and(|r| r.starts_with(' ')))
+                    })?;
+                    (&line[..at], &line[at..])
+                }
+            };
             let mut words = rest.split_whitespace();
             let state = words.next()?.to_owned();
             let model = words.find_map(|w| w.strip_prefix("model:")).map(|m| m.replace('_', " "));
@@ -319,6 +332,26 @@ mod tests {
         assert_eq!(l[2].model, None);
         assert_eq!(phone_id(&l[1].serial), "X6PROFAKESN00001");
         assert_eq!(phone_id("192.0.2.78:5555"), "192.0.2.78:5555");
+    }
+
+    #[test]
+    fn the_long_listing_pads_with_spaces() {
+        // `adb devices -l` from scrcpy 4.1's adb, 21 Oct 2026: no tabs at all.
+        let l = parse_devices(
+            "List of devices attached\r\n\
+             adb-X6PROFAKESN00001-abc123._adb-tls-connect._tcp device product:duchamp_global model:2311DRK48G device:duchamp transport_id:73\r\n\
+             adb-X6PROFAKESN00001-abc123 (2)._adb-tls-connect._tcp offline transport_id:74\r\n\
+             192.0.2.78:5555     unauthorized transport_id:75\r\n\r\n",
+        );
+        assert_eq!(l.len(), 3);
+        assert_eq!(l[0].serial, "adb-X6PROFAKESN00001-abc123._adb-tls-connect._tcp");
+        assert_eq!(l[0].state, "device");
+        assert_eq!(l[0].model.as_deref(), Some("2311DRK48G"));
+        assert_eq!(l[1].serial, "adb-X6PROFAKESN00001-abc123 (2)._adb-tls-connect._tcp");
+        assert_eq!(l[1].state, "offline");
+        assert_eq!(l[2].serial, "192.0.2.78:5555");
+        assert_eq!(l[2].state, "unauthorized");
+        assert!(matches!(choose(&l, None, None).0, DeviceState::Ready(ref s) if s == &l[0].serial));
     }
 
     #[test]

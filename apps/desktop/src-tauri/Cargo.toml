@@ -22,6 +22,8 @@ base64 = "0.22"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 tpl-policy = { path = "../../../crates/policy" }
+# WebRTC's AEC3 echo canceller, ported to Rust (MIT OR BSD-3-Clause): takes the speakers out of the phone mic.
+aec3 = { version = "=0.4.0", default-features = false }
 
 [dependencies.windows]
 version = "0.62"
@@ -35,6 +37,7 @@ features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_System_Threading",
+    "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_Debug",
