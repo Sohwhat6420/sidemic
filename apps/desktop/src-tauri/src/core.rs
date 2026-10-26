@@ -2,11 +2,11 @@
 //! keep the phone link up, open and close Bluetooth audio, and watch the laptop (who has the mic, what is playing,
 //! which app is in front). They all talk to the brain through one channel, and the UI only ever reads `snapshot`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -32,8 +32,11 @@ pub enum Msg {
     Laptop(Event),
     Act { action: String, arg: Option<String> },
     MicNote(String),
-    /// Other phones adb can reach, as (phone id, model), for "Use this phone".
-    Phones(Vec<(String, String)>),
+    /// Every phone adb can reach right now as (phone id, model), the phone the user picked (`chosen`) and the one
+    /// the link is actually on (`active`: a stand-in while `chosen` is missing and auto-switch is on).
+    Roster { ready: Vec<(String, String)>, chosen: Option<String>, active: Option<String> },
+    /// Something the user must be told about the phone link (a switch happened, the chosen phone is missing).
+    Notice { text: String, buttons: Vec<(String, String, String)> },
 }
 
 /// How far the phone link has got, for the hints under the phone's name.
@@ -65,6 +68,9 @@ struct Settings {
     /// Set while paused: the settings to put back on Resume. Pausing means laptop mic, phone audio on the
     /// phone, and nothing automatic — Windows as if the app weren't there, but Discord keeps a working mic.
     paused: Option<Paused>,
+    /// When the phone he picked isn't reachable, use the other ready phone he used last, say so, and go back when
+    /// the picked one returns. Off: it only offers.
+    auto_switch: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -76,7 +82,14 @@ struct Paused {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { mic_mode: MicMode::Auto, audio_mode: AudioMode::Auto, smart_auto: true, autostart_set: false, paused: None }
+        Self {
+            mic_mode: MicMode::Auto,
+            audio_mode: AudioMode::Auto,
+            smart_auto: true,
+            autostart_set: false,
+            paused: None,
+            auto_switch: false,
+        }
     }
 }
 
@@ -118,7 +131,31 @@ struct Core {
     phone: PhoneInfo,
     /// Something the phone refused, explained for its brand (see `refusal_hint`).
     phone_warning: Option<String>,
-    other_phones: Vec<(String, String)>,
+    /// The phone list as the link thread last reported it.
+    roster: Roster,
+    /// Each phone's own name (from its hello), by phone id, remembered in `phone-names.json` so the menu can show
+    /// phones that aren't connected right now.
+    known: BTreeMap<String, String>,
+    /// The chosen phone a "not reachable" notice was last shown for, so it appears once per outage.
+    notified_missing: Option<String>,
+    last_menu: String,
+}
+
+struct PhoneRow {
+    id: String,
+    label: String,
+    ready: bool,
+    /// The link is on this phone (or, while connecting, going to be).
+    active: bool,
+    /// The one he picked, which the link returns to when it is reachable.
+    chosen: bool,
+}
+
+#[derive(Default)]
+struct Roster {
+    ready: Vec<(String, String)>,
+    chosen: Option<String>,
+    active: Option<String>,
 }
 
 #[derive(Default)]
@@ -173,6 +210,10 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
         .and_then(|s| Memory::from_json(&s).ok())
         .unwrap_or_default();
 
+    let known: BTreeMap<String, String> =
+        fs::read_to_string(data_dir.join("phone-names.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    AUTO_SWITCH.store(settings.auto_switch, Ordering::Relaxed);
+
     let core = Core {
         app,
         engine: Engine::new(Config::default(), memory),
@@ -203,7 +244,10 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
         last_live: "off".into(),
         phone: PhoneInfo::default(),
         phone_warning: None,
-        other_phones: Vec::new(),
+        roster: Roster::default(),
+        known,
+        notified_missing: None,
+        last_menu: String::new(),
     };
     thread::Builder::new().name("tpl-core".into()).spawn(move || core.run(rx)).unwrap();
     Handle { tx, snapshot }
@@ -292,6 +336,14 @@ impl Core {
                         "phone said hello: {name} ({manufacturer} {model}, Android {android}, Bluetooth name {bt_name:?})"
                     ));
                     self.name = Some(if name.is_empty() { model.clone() } else { name });
+                    if let (Some(id), Some(n)) = (self.roster.active.clone(), self.name.clone()) {
+                        if self.known.get(&id) != Some(&n) {
+                            self.known.insert(id, n);
+                            if let Ok(s) = serde_json::to_string_pretty(&self.known) {
+                                let _ = fs::write(self.dir.join("phone-names.json"), s);
+                            }
+                        }
+                    }
                     self.phone = PhoneInfo { model, manufacturer, bt_name };
                     self.phone_warning = None;
                     self.link_changed();
@@ -354,7 +406,54 @@ impl Core {
                 self.mic_note = Some(n);
             }
             Msg::Act { action, arg } => self.act(&action, arg.as_deref()),
-            Msg::Phones(p) => self.other_phones = p,
+            Msg::Roster { ready, chosen, active } => {
+                if active != self.roster.active && self.roster.active.is_some() {
+                    // The link moved to another phone: forget what the last one said about itself.
+                    self.name = None;
+                    self.wallpaper = None;
+                    self.phone = PhoneInfo::default();
+                    self.phone_warning = None;
+                }
+                self.roster = Roster { ready, chosen, active };
+                self.check_chosen_missing();
+            }
+            Msg::Notice { text, buttons } => {
+                self.banner = Some(Banner { text, buttons, until: Some(Instant::now() + Duration::from_secs(120)) });
+            }
+        }
+    }
+
+    /// The name to show for a phone: what it called itself, else the model adb saw, else its id.
+    fn phone_label(&self, id: &str) -> String {
+        self.known
+            .get(id)
+            .cloned()
+            .or_else(|| self.roster.ready.iter().find(|(i, _)| i == id).map(|(_, m)| m.clone()))
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    /// Never a silent substitute: when the phone he picked can't be reached and another one can, say so once and
+    /// offer it (with auto-switch on, the link thread has already moved and sends its own notice).
+    fn check_chosen_missing(&mut self) {
+        let Some(chosen) = self.roster.chosen.clone() else { return };
+        let chosen_ready = self.roster.ready.iter().any(|(id, _)| *id == chosen);
+        if chosen_ready {
+            self.notified_missing = None;
+            return;
+        }
+        let other = self.roster.ready.iter().find(|(id, _)| *id != chosen).map(|(id, _)| id.clone());
+        if self.settings.auto_switch || self.notified_missing.as_ref() == Some(&chosen) {
+            return;
+        }
+        if let Some(other) = other {
+            self.notified_missing = Some(chosen.clone());
+            let (c, o) = (self.phone_label(&chosen), self.phone_label(&other));
+            log::line(format!("chosen phone {c} isn't reachable; {o} is ready (offered, not switched)"));
+            self.banner = Some(Banner {
+                text: format!("{c} isn't reachable. {o} is ready."),
+                buttons: vec![(format!("Use {o}"), "use_phone".into(), other), ("Not now".into(), "dismiss".into(), String::new())],
+                until: Some(Instant::now() + Duration::from_secs(120)),
+            });
         }
     }
 
@@ -455,11 +554,21 @@ impl Core {
             "use_phone" => {
                 if let Some(id) = arg {
                     *PICK.lock().unwrap() = Some(id.to_owned());
-                    self.name = None;
-                    self.wallpaper = None;
-                    self.phone = PhoneInfo::default();
-                    self.phone_warning = None;
+                    self.banner = None;
+                    // A tray tick flips by itself when clicked; redraw the menu from the truth.
+                    self.last_json.clear();
+                    self.last_menu.clear();
                 }
+            }
+            "toggle_auto_switch" => {
+                self.settings.auto_switch = !self.settings.auto_switch;
+                AUTO_SWITCH.store(self.settings.auto_switch, Ordering::Relaxed);
+                self.save_settings();
+                log::line(format!("auto-switch to the last-used ready phone: {}", self.settings.auto_switch));
+                self.notified_missing = None;
+                self.check_chosen_missing();
+                self.last_json.clear();
+                self.last_menu.clear();
             }
             "mark" => {
                 let mut snap = self.snapshot.lock().unwrap().clone();
@@ -571,6 +680,26 @@ impl Core {
         }
     }
 
+    /// Every phone worth listing: those ready now, the one he picked (even when it is missing), and the one the
+    /// link is on, in that order of the roster.
+    fn phone_rows(&self) -> Vec<PhoneRow> {
+        let mut ids: Vec<String> = self.roster.ready.iter().map(|(id, _)| id.clone()).collect();
+        for extra in [&self.roster.chosen, &self.roster.active].into_iter().flatten() {
+            if !ids.contains(extra) {
+                ids.push(extra.clone());
+            }
+        }
+        ids.into_iter()
+            .map(|id| PhoneRow {
+                label: self.phone_label(&id),
+                ready: self.roster.ready.iter().any(|(i, _)| *i == id),
+                active: self.roster.active.as_ref() == Some(&id),
+                chosen: self.roster.chosen.as_ref() == Some(&id),
+                id,
+            })
+            .collect()
+    }
+
     /// Builds the UI's state and sends it if anything changed.
     fn publish(&mut self) {
         let st = self.engine.state();
@@ -582,6 +711,16 @@ impl Core {
             Link::Failed(e) => ("Couldn't start on the phone".to_owned(), format!("Starting TRUE Phone Link on the phone failed: {e}. It retries by itself.")),
             Link::Starting | Link::Ready if !connected => ("Connecting…".to_owned(), "Starting TRUE Phone Link on the phone. This takes a few seconds.".to_owned()),
             _ => (String::new(), String::new()),
+        };
+
+        let phones = self.phone_rows();
+        let other_phones: Vec<&PhoneRow> = phones.iter().filter(|p| p.ready && !p.active).collect();
+        // The phone he picked isn't here but another is: say which, in the hint and the tray tooltip.
+        let hint = match (&self.roster.chosen, other_phones.first()) {
+            (Some(c), Some(o)) if !connected && !phones.iter().any(|p| p.id == *c && p.ready) => {
+                format!("{} isn't reachable; {} is ready", self.phone_label(c), o.label)
+            }
+            _ => hint,
         };
 
         let live = match self.mic.live.load(Ordering::Relaxed) {
@@ -646,7 +785,9 @@ impl Core {
             "hint": hint,
             "hint_long": hint_long,
             "phone_warning": self.phone_warning,
-            "other_phones": self.other_phones.iter().map(|(id, model)| json!({"id": id, "model": model})).collect::<Vec<_>>(),
+            "other_phones": other_phones.iter().map(|p| json!({"id": p.id, "model": p.label})).collect::<Vec<_>>(),
+            "phones": phones.iter().map(|p| json!({"id": p.id, "label": p.label, "ready": p.ready, "active": p.active, "chosen": p.chosen})).collect::<Vec<_>>(),
+            "auto_switch": self.settings.auto_switch,
             "device": {"name": self.name},
             "battery": if connected { self.battery } else { None },
             "charging": self.charging,
@@ -679,6 +820,15 @@ impl Core {
             let tip = tooltip(connected, &hint, live, &playing, st.phone_audio);
             crate::set_tray_tooltip(&self.app, &if paused { format!("{tip}\nPaused") } else { tip });
             crate::set_pause_label(&self.app, paused);
+            let menu = json!([&phones.iter().map(|p| (&p.id, &p.label, p.ready, p.active)).collect::<Vec<_>>(), self.settings.auto_switch]).to_string();
+            if menu != self.last_menu {
+                self.last_menu = menu;
+                crate::set_phones_menu(
+                    &self.app,
+                    phones.iter().map(|p| crate::PhoneMenuRow { id: p.id.clone(), label: p.label.clone(), ready: p.ready, active: p.active }).collect(),
+                    self.settings.auto_switch,
+                );
+            }
             *self.snapshot.lock().unwrap() = state.clone();
             let _ = self.app.emit("state", state);
         }
@@ -752,10 +902,20 @@ pub fn shutdown() {
 struct Remembered {
     phone: Option<String>,
     addr: Option<String>,
+    /// When each phone was last in use (unix seconds), for auto-switch's "the one he used last".
+    used: BTreeMap<String, u64>,
 }
 
-/// "Use this phone" from the Connection page; the adb thread picks it up.
+/// "Use this phone" from the tray or the Connection page; the adb thread picks it up.
 static PICK: Mutex<Option<String>> = Mutex::new(None);
+
+/// The auto-switch setting, mirrored here for the adb thread.
+static AUTO_SWITCH: AtomicBool = AtomicBool::new(false);
+
+/// How long the chosen phone must be missing before auto-switch moves to another (adb's mDNS blips for seconds).
+const SWITCH_AFTER: Duration = Duration::from_secs(15);
+/// How often the phone list is refreshed while the phone is connected (each refresh is one `adb devices`).
+const ROSTER_EVERY: Duration = Duration::from_secs(8);
 
 fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone_dir: PathBuf, data_dir: PathBuf) {
     let Some(adb) = Adb::find(None) else {
@@ -776,47 +936,134 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
     }
     let mut server: Option<(String, Child)> = None;
     let mut fails = 0;
-    let mut last_others = Vec::new();
     let mut next_reconnect = Instant::now();
+    // While the phone he picked (`mine.phone`) is missing and auto-switch is on, the link runs on this one instead.
+    let mut stand_in: Option<String> = None;
+    let mut missing_since: Option<Instant> = None;
+    let mut last_roster = (Vec::new(), None, None);
+    let mut next_roster = Instant::now();
+    let mut next_used_save = Instant::now();
+    // Stops the running server and drops the control channel, so the next pass starts on the phone now wanted.
+    let drop_link = |server: &mut Option<(String, Child)>| {
+        if let Some((s, mut c)) = server.take() {
+            adb.stop_server(&s);
+            let _ = c.kill();
+        }
+        ctl.disconnect();
+    };
     loop {
         if let Some(p) = PICK.lock().unwrap().take() {
-            if mine.phone.as_deref() != Some(p.as_str()) {
-                log::line(format!("phone picked from the Connection page: {p}"));
-                mine = Remembered { phone: Some(p), addr: None };
+            if stand_in.as_deref() == Some(p.as_str()) {
+                // He picked the phone the link is already standing in on: it becomes his phone, no restart.
+                log::line(format!("phone picked: {p} (already in use)"));
+                mine.phone = Some(p);
+                mine.addr = None;
+                stand_in = None;
                 save(&mine);
-                if let Some((s, mut c)) = server.take() {
-                    adb.stop_server(&s);
-                    let _ = c.kill();
-                }
-                ctl.disconnect();
+            } else if mine.phone.as_deref() != Some(p.as_str()) || stand_in.is_some() {
+                log::line(format!("phone picked: {p}"));
+                mine.phone = Some(p);
+                mine.addr = None;
+                stand_in = None;
+                missing_since = None;
+                save(&mine);
+                drop_link(&mut server);
             }
         }
-        if ctl.connected() {
+        let listed = if ctl.connected() && Instant::now() < next_roster {
             thread::sleep(Duration::from_secs(2));
             continue;
+        } else {
+            next_roster = Instant::now() + ROSTER_EVERY;
+            adb.devices()
+        };
+        let ready = crate::adb::ready_phones(&listed);
+        let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+
+        // Auto-switch: the picked phone can't be reached, so use the one he used last; go back when it returns.
+        let chosen_ready = mine.phone.as_ref().is_some_and(|c| ready.iter().any(|(id, _)| id == c));
+        if let Some(chosen) = mine.phone.clone() {
+            if chosen_ready {
+                missing_since = None;
+                if let Some(s) = stand_in.take() {
+                    log::line(format!("auto-switch: {chosen} is back, returning to it from {s}"));
+                    let _ = tx.send(Msg::Notice {
+                        text: "Your phone is back, so TRUE Phone Link has switched to it.".into(),
+                        buttons: vec![("OK".into(), "dismiss".into(), String::new())],
+                    });
+                    drop_link(&mut server);
+                }
+            } else if AUTO_SWITCH.load(Ordering::Relaxed) {
+                let since = *missing_since.get_or_insert_with(Instant::now);
+                let current_ok = stand_in.as_ref().is_some_and(|s| ready.iter().any(|(id, _)| id == s));
+                if !current_ok && since.elapsed() >= SWITCH_AFTER {
+                    let next = crate::adb::stand_in(&ready, &chosen, &mine.used);
+                    if next != stand_in {
+                        match &next {
+                            Some(n) => {
+                                log::line(format!("auto-switch: {chosen} isn't reachable, using {n}"));
+                                let _ = tx.send(Msg::Notice {
+                                    text: "Your phone isn't reachable, so TRUE Phone Link is using the other ready phone. It goes back when yours returns.".into(),
+                                    buttons: vec![("OK".into(), "dismiss".into(), String::new())],
+                                });
+                            }
+                            None => log::line(format!("auto-switch: {chosen} isn't reachable and no other phone is ready")),
+                        }
+                        stand_in = next;
+                        drop_link(&mut server);
+                    }
+                }
+            } else {
+                missing_since = None;
+                if stand_in.take().is_some() {
+                    log::line("auto-switch turned off: back to the phone he picked");
+                    drop_link(&mut server);
+                }
+            }
         }
+
+        let want = stand_in.clone().or_else(|| mine.phone.clone());
         let current = server.as_ref().map(|(s, _)| s.as_str());
-        let (state, others) = crate::adb::choose(&adb.devices(), mine.phone.as_deref(), current);
-        if others != last_others {
-            let _ = tx.send(Msg::Phones(others.clone()));
-            last_others = others;
+        let (state, _) = crate::adb::choose(&listed, want.as_deref(), current);
+        let active = match &state {
+            DeviceState::Ready(s) => Some(crate::adb::phone_id(s)),
+            _ => None,
+        };
+        let roster = (ready.clone(), mine.phone.clone().or_else(|| active.clone()), active.clone());
+        if roster != last_roster {
+            let _ = tx.send(Msg::Roster { ready, chosen: roster.1.clone(), active: roster.2.clone() });
+            last_roster = roster;
+        }
+        if ctl.connected() {
+            // Remember when this phone was last in use, at most once a minute.
+            if let Some(id) = &active {
+                if Instant::now() >= next_used_save {
+                    next_used_save = Instant::now() + Duration::from_secs(60);
+                    mine.used.insert(id.clone(), unix);
+                    save(&mine);
+                }
+            }
+            continue;
         }
         match state {
             DeviceState::Ready(serial) => {
                 let _ = tx.send(Msg::Link(Link::Starting));
                 let id = crate::adb::phone_id(&serial);
-                if mine.phone.as_deref() != Some(id.as_str()) {
+                if stand_in.is_none() && mine.phone.as_deref() != Some(id.as_str()) {
                     log::line(format!("using phone {id} ({serial})"));
-                    mine.phone = Some(id);
+                    mine.phone = Some(id.clone());
                     save(&mine);
                 }
-                if let Some(addr) = adb.address(&serial) {
-                    if mine.addr.as_deref() != Some(addr.as_str()) {
-                        log::line(format!("phone listens on {addr}"));
-                        mine.addr = Some(addr);
-                        save(&mine);
+                if stand_in.is_none() {
+                    if let Some(addr) = adb.address(&serial) {
+                        if mine.addr.as_deref() != Some(addr.as_str()) {
+                            log::line(format!("phone listens on {addr}"));
+                            mine.addr = Some(addr);
+                            save(&mine);
+                        }
                     }
                 }
+                mine.used.insert(id, unix);
                 let stale = match server.as_mut() {
                     Some((s, c)) => *s != serial || c.try_wait().ok().flatten().is_some(),
                     None => true,

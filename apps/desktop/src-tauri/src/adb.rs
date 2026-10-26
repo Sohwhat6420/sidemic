@@ -136,6 +136,40 @@ pub fn choose(list: &[Listed], want: Option<&str>, current: Option<&str>) -> (De
     (state, others)
 }
 
+/// Every phone that is ready right now (`phone_id`, model), once each, for the tray's Phones menu. Emulators and
+/// USB rows are left out, as in `choose`.
+pub fn ready_phones(list: &[Listed]) -> Vec<(String, String)> {
+    let mut ready: Vec<(String, String)> = list
+        .iter()
+        .filter(|l| l.network() && l.state == "device")
+        .map(|l| {
+            let id = phone_id(&l.serial);
+            let model = l.model.clone().unwrap_or_else(|| id.clone());
+            (id, model)
+        })
+        .collect();
+    ready.sort();
+    // One phone can be listed twice (a re-advertised mDNS instance); keep the entry that knows its model.
+    ready.dedup_by(|b, a| {
+        let same = a.0 == b.0;
+        if same && a.1 == a.0 {
+            a.1 = std::mem::take(&mut b.1);
+        }
+        same
+    });
+    ready
+}
+
+/// Which ready phone to stand in for a missing `chosen` one: the one used most recently (`used` holds each phone's
+/// last-used time), else the first by id. Never `chosen` itself.
+pub fn stand_in(ready: &[(String, String)], chosen: &str, used: &std::collections::BTreeMap<String, u64>) -> Option<String> {
+    ready
+        .iter()
+        .filter(|(id, _)| id != chosen)
+        .max_by_key(|(id, _)| (used.get(id).copied().unwrap_or(0), std::cmp::Reverse(id.clone())))
+        .map(|(id, _)| id.clone())
+}
+
 /// Parses `adb mdns services` into (instance's phone_id, "ip:port") for Wireless debugging connect services.
 pub fn parse_mdns(out: &str) -> Vec<(String, String)> {
     out.lines()
@@ -424,6 +458,36 @@ mod tests {
         let only = parse_devices("List of devices attached\nemulator-5554\tdevice model:sdk_gphone64_x86_64\n");
         assert_eq!(choose(&only, None, None), (DeviceState::Missing, vec![]));
         assert_eq!(choose(&only, Some("emulator-5554"), None).0, DeviceState::Missing);
+    }
+
+    #[test]
+    fn ready_phones_lists_each_once_with_its_model() {
+        let l = parse_devices(TWO_PHONES);
+        assert_eq!(
+            ready_phones(&l),
+            vec![("S24FAKESN01".to_owned(), "SM S928B".to_owned()), ("X6PROFAKESN00001".to_owned(), "2311DRK48G".to_owned())]
+        );
+        // The model-less duplicate listed first must not win.
+        let l = parse_devices(
+            "List of devices attached\n\
+             adb-X6PROFAKESN00001-a._adb-tls-connect._tcp\tdevice\n\
+             adb-X6PROFAKESN00001-a (2)._adb-tls-connect._tcp\tdevice model:2311DRK48G\n\
+             adb-S24FAKESN01-b._adb-tls-connect._tcp\toffline model:SM_S928B\n",
+        );
+        assert_eq!(ready_phones(&l), vec![("X6PROFAKESN00001".to_owned(), "2311DRK48G".to_owned())]);
+    }
+
+    #[test]
+    fn the_stand_in_is_the_last_used_other_phone() {
+        let ready = vec![("A".to_owned(), "a".to_owned()), ("B".to_owned(), "b".to_owned()), ("C".to_owned(), "c".to_owned())];
+        let mut used = std::collections::BTreeMap::new();
+        assert_eq!(stand_in(&ready, "A", &used).as_deref(), Some("B"));
+        used.insert("C".to_owned(), 50);
+        used.insert("B".to_owned(), 10);
+        used.insert("A".to_owned(), 99);
+        assert_eq!(stand_in(&ready, "A", &used).as_deref(), Some("C"));
+        assert_eq!(stand_in(&ready[..1], "A", &used), None);
+        assert_eq!(stand_in(&[], "A", &used), None);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Effect, EffectsBuilder};
 use tauri::{
@@ -306,6 +306,59 @@ pub fn set_pause_label(app: &AppHandle, paused: bool) {
     });
 }
 
+/// One row of the tray's Phones submenu.
+#[derive(Clone)]
+pub struct PhoneMenuRow {
+    pub id: String,
+    pub label: String,
+    pub ready: bool,
+    pub active: bool,
+}
+
+/// The tray's Phones submenu, rebuilt whenever the list of phones changes.
+struct PhonesMenu(Submenu<tauri::Wry>);
+
+/// The latest rows, kept so a submenu built after the core first published (setup order) still gets them.
+static PHONES: Mutex<Option<(Vec<PhoneMenuRow>, bool)>> = Mutex::new(None);
+
+/// Posted to the UI thread like the other tray updates.
+pub fn set_phones_menu(app: &AppHandle, rows: Vec<PhoneMenuRow>, auto_switch: bool) {
+    *PHONES.lock().unwrap() = Some((rows, auto_switch));
+    apply_phones_menu(app);
+}
+
+fn apply_phones_menu(app: &AppHandle) {
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(menu) = app2.try_state::<PhonesMenu>() else { return };
+        let Some((rows, auto_switch)) = PHONES.lock().unwrap().clone() else { return };
+        if let Ok(old) = menu.0.items() {
+            for item in old {
+                let _ = menu.0.remove(&item);
+            }
+        }
+        if rows.is_empty() {
+            if let Ok(none) = MenuItem::with_id(&app2, "phones-none", "No phone is ready", false, None::<&str>) {
+                let _ = menu.0.append(&none);
+            }
+        }
+        for r in &rows {
+            let label = if r.ready { r.label.clone() } else { format!("{} (not reachable)", r.label) };
+            if let Ok(item) = CheckMenuItem::with_id(&app2, format!("phone:{}", r.id), label, r.ready, r.active, None::<&str>) {
+                let _ = menu.0.append(&item);
+            }
+        }
+        if let Ok(sep) = PredefinedMenuItem::separator(&app2) {
+            let _ = menu.0.append(&sep);
+        }
+        if let Ok(auto) =
+            CheckMenuItem::with_id(&app2, "auto-switch", "Auto-switch to the last-used ready phone", true, auto_switch, None::<&str>)
+        {
+            let _ = menu.0.append(&auto);
+        }
+    });
+}
+
 pub fn autostart_enabled(app: &AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
 }
@@ -382,8 +435,11 @@ fn main() {
             let logs = MenuItem::with_id(app, "logs", "Open the log folder", true, None::<&str>)?;
             let pause = MenuItem::with_id(app, "pause", "Pause TRUE Phone Link", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &pause, &mark, &logs, &quit])?;
+            let phones = Submenu::with_id(app, "phones", "Phones", true)?;
+            let menu = Menu::with_items(app, &[&open, &phones, &pause, &mark, &logs, &quit])?;
             app.manage(PauseItem(pause));
+            app.manage(PhonesMenu(phones));
+            apply_phones_menu(app.handle());
             // The brain may have published before the item existed (started paused): catch up from its snapshot.
             let paused = app.state::<core::Handle>().snapshot.lock().unwrap()["paused"].as_bool() == Some(true);
             set_pause_label(app.handle(), paused);
@@ -405,7 +461,16 @@ fn main() {
                         }
                     }
                     "quit" => app.exit(0),
-                    _ => {}
+                    "auto-switch" => {
+                        let h = app.state::<core::Handle>();
+                        let _ = h.tx.send(core::Msg::Act { action: "toggle_auto_switch".into(), arg: None });
+                    }
+                    id => {
+                        if let Some(phone) = id.strip_prefix("phone:") {
+                            let h = app.state::<core::Handle>();
+                            let _ = h.tx.send(core::Msg::Act { action: "use_phone".into(), arg: Some(phone.into()) });
+                        }
+                    }
                 })
                 .on_tray_icon_event(|tray, e| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
