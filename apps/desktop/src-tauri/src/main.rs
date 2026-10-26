@@ -32,6 +32,8 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 const FLYOUT_WIDTH: f64 = 360.0;
 const AUTOSTART_ARG: &str = "--autostart";
+/// Written to the data dir when Quit is chosen from the tray, removed at start-up (see `tools/tpl-watch.pyw`).
+const QUIT_FLAG: &str = "quit.flag";
 
 /// WebView2's arguments for both windows (they share one browser process, so they must match): wry's defaults
 /// plus no GPU process. The GPU process held 76 MB at start and about 200 MB after a day for two small, mostly
@@ -412,6 +414,7 @@ fn main() {
             let handle = app.handle().clone();
             let data = app.path().app_data_dir()?;
             log::init(data.join("logs"));
+            let _ = std::fs::remove_file(data.join(QUIT_FLAG));
             let at_sign_in = std::env::args().any(|a| a == AUTOSTART_ARG);
             log::line(format!(
                 "TRUE Phone Link {} started{}",
@@ -460,7 +463,13 @@ fn main() {
                             let _ = std::process::Command::new("explorer.exe").arg(d).spawn();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // Tells the restart watcher (tools/tpl-watch.pyw) this stop is deliberate.
+                        if let Ok(d) = app.path().app_data_dir() {
+                            let _ = std::fs::write(d.join(QUIT_FLAG), "quit from the tray");
+                        }
+                        app.exit(0)
+                    }
                     "auto-switch" => {
                         let h = app.state::<core::Handle>();
                         let _ = h.tx.send(core::Msg::Act { action: "toggle_auto_switch".into(), arg: None });

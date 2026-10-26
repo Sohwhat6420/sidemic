@@ -87,12 +87,19 @@ pub fn parse_devices(out: &str) -> Vec<Listed> {
 /// The phone behind a serial, stable across its mDNS instances and ports: the phone's own serial number for
 /// Wireless debugging (`adb-X6PROFAKESN00001-abc123 (2)._adb-tls-connect._tcp` → `X6PROFAKESN00001`), or the
 /// serial itself for `ip:port`.
+///
+/// An `ip:port` serial (after `adb connect`, which the reconnect fallback uses) has no serial number in its name; the
+/// phone's own is looked up once by `Adb::devices` and remembered here (26 Oct: without it the phone came back from a
+/// drop under its address, which matched nothing, and the app called its own phone "another phone").
 pub fn phone_id(serial: &str) -> String {
     serial
         .strip_prefix("adb-")
         .and_then(|rest| rest.split_once('-'))
-        .map_or_else(|| serial.to_owned(), |(id, _)| id.to_owned())
+        .map_or_else(|| ADDR_OWNER.lock().unwrap().get(serial).cloned().unwrap_or_else(|| serial.to_owned()), |(id, _)| id.to_owned())
 }
+
+/// `ip:port` serial → the phone's own serial number (`ro.serialno`).
+static ADDR_OWNER: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Which phone to use, out of everything adb lists.
 ///
@@ -253,7 +260,19 @@ impl Adb {
 
     /// Everything adb lists. adb connects to paired phones by itself through mDNS.
     pub fn devices(&self) -> Vec<Listed> {
-        self.run(&["devices", "-l"]).map(|out| parse_devices(&out)).unwrap_or_default()
+        let list = self.run(&["devices", "-l"]).map(|out| parse_devices(&out)).unwrap_or_default();
+        for l in &list {
+            let by_address = l.state == "device" && l.network() && !l.serial.starts_with("adb-");
+            if by_address && !ADDR_OWNER.lock().unwrap().contains_key(&l.serial) {
+                if let Ok(out) = self.shell(&l.serial, "getprop ro.serialno") {
+                    let id = out.trim();
+                    if !id.is_empty() && !id.contains(char::is_whitespace) {
+                        ADDR_OWNER.lock().unwrap().insert(l.serial.clone(), id.to_owned());
+                    }
+                }
+            }
+        }
+        list
     }
 
     /// The address the phone's Wireless debugging is listening on right now ("ip:port"), to reconnect to it
@@ -368,6 +387,18 @@ mod tests {
         adb-S24FAKESN01-Xy12Zq._adb-tls-connect._tcp\tdevice product:e3qxxx model:SM_S928B device:e3q transport_id:15\n\
         adb-X6PROFAKESN00001-abc123 (2)._adb-tls-connect._tcp\tdevice product:duchamp_global model:2311DRK48G transport_id:22\n\
         adb-X6PROFAKESN00001-abc123._adb-tls-connect._tcp\tdevice\n\n";
+
+    #[test]
+    fn a_phone_reconnected_by_address_is_still_the_same_phone() {
+        // 26 Oct live test: after `adb connect 192.0.2.78:34363` the phone is listed by address only.
+        ADDR_OWNER.lock().unwrap().insert("192.0.2.78:34363".into(), "X6PROFAKESN00001".into());
+        let list = parse_devices("List of devices attached\n192.0.2.78:34363\tdevice product:duchamp_global model:2311DRK48G transport_id:3\n");
+        assert_eq!(phone_id("192.0.2.78:34363"), "X6PROFAKESN00001");
+        assert_eq!(ready_phones(&list), vec![("X6PROFAKESN00001".to_string(), "2311DRK48G".to_string())]);
+        let (state, others) = choose(&list, Some("X6PROFAKESN00001"), None);
+        assert_eq!(state, DeviceState::Ready("192.0.2.78:34363".into()));
+        assert!(others.is_empty(), "its own address must not be offered as another phone");
+    }
 
     #[test]
     fn serials_with_spaces_parse() {
