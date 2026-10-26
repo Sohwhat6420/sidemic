@@ -40,7 +40,20 @@ impl Listed {
     /// Wireless debugging (mDNS, `adb-<serialno>-<id>._adb-tls-connect._tcp`) or `adb connect ip:port`. USB is
     /// ignored: the app is wireless only.
     fn network(&self) -> bool {
-        self.serial.contains("._adb-tls-connect.") || self.serial.contains(':')
+        (self.serial.contains("._adb-tls-connect.") || self.serial.contains(':')) && !self.emulator()
+    }
+
+    /// An Android emulator (`emulator-5554`, or one reached through a loopback address) is never a phone to use.
+    fn emulator(&self) -> bool {
+        let s = self.serial.to_lowercase();
+        let m = self.model.as_deref().unwrap_or_default().to_lowercase();
+        s.starts_with("emulator-")
+            || s.starts_with("127.")
+            || s.starts_with("localhost:")
+            || s.starts_with("[::1]")
+            || m.starts_with("sdk gphone")
+            || m.starts_with("android sdk")
+            || m.contains("emulator")
     }
 }
 
@@ -393,6 +406,24 @@ mod tests {
             choose(&stale, Some("X6PROFAKESN00001"), Some(cur)).0,
             DeviceState::Ready("adb-X6PROFAKESN00001-abc123 (2)._adb-tls-connect._tcp".into())
         );
+    }
+
+    #[test]
+    fn emulators_are_never_a_phone() {
+        let l = parse_devices(
+            "List of devices attached\n\
+             emulator-5554\tdevice product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:3\n\
+             127.0.0.1:5555\tdevice model:Pixel_7\n\
+             adb-X6PROFAKESN00001-abc123._adb-tls-connect._tcp\tdevice model:2311DRK48G\n",
+        );
+        assert_eq!(l.len(), 3);
+        let (s, others) = choose(&l, None, None);
+        assert_eq!(s, DeviceState::Ready("adb-X6PROFAKESN00001-abc123._adb-tls-connect._tcp".into()));
+        assert!(others.is_empty());
+        // Even when only an emulator is attached, or one was remembered, it is not offered or used.
+        let only = parse_devices("List of devices attached\nemulator-5554\tdevice model:sdk_gphone64_x86_64\n");
+        assert_eq!(choose(&only, None, None), (DeviceState::Missing, vec![]));
+        assert_eq!(choose(&only, Some("emulator-5554"), None).0, DeviceState::Missing);
     }
 
     #[test]
