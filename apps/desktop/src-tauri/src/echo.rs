@@ -489,6 +489,74 @@ mod tests {
         assert_eq!(&out[24..], &[0.0; 2]); // not recorded yet
     }
 
+    /// Step 4b (26 Oct): does the extra stream delay change the echo that is left? Offline, through the same AEC3
+    /// pipeline and `config()` the app uses. A speech-like clip is "played"; the phone hears 0.4 × it after
+    /// `lag` ms (a room plus a slow speaker); the reference AEC3 sees is the clip `extra` ms older, exactly as
+    /// `Canceller::process` pairs them (apparent lag = lag − extra). Prints the table for the investigation note.
+    #[test]
+    #[ignore = "50 s: cargo test -p tpl-desktop the_extra_delay -- --ignored --nocapture"]
+    fn the_extra_delay_setting_changes_the_echo_left() {
+        fn clip(n: usize) -> Vec<f32> {
+            let mut seed = 12345u32;
+            let mut lp = 0.0f32;
+            (0..n)
+                .map(|i| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let noise = (seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0;
+                    lp += 0.25 * (noise - lp); // dull the noise towards a voice-like tilt
+                    let t = i as f32 / RATE as f32;
+                    let env = (0.5 + 0.5 * (2.0 * std::f32::consts::PI * 3.7 * t).sin()).powf(1.5);
+                    lp * env * 1.6
+                })
+                .collect()
+        }
+        fn left_db(lag_ms: usize, extra_ms: usize) -> f32 {
+            let total = RATE as usize * 12;
+            let play = clip(total);
+            let lag = lag_ms * MS as usize;
+            let extra = extra_ms * MS as usize;
+            // A direct path plus two room reflections, so the echo is only partly correlated with what was played.
+            let tap = |n: usize, d: usize, g: f32| if n >= d { g * play[n - d] } else { 0.0 };
+            let heard = |n: usize| tap(n, lag, 0.4) + tap(n, lag + 9 * MS as usize, 0.15) + tap(n, lag + 23 * MS as usize, -0.1);
+            let reference = |n: usize| if n >= extra { play[n - extra] } else { 0.0 };
+            let format = AudioFormat::ten_ms(RATE, 1);
+            let mut pipe = linear::builder(format, format)
+                .aec3_config(config())
+                .enable_noise_suppression(false)
+                .enable_gain_controller2(false)
+                .build()
+                .unwrap();
+            let (mut out, mut frame, mut render) = (vec![0.0f32; FRAME], vec![0.0f32; FRAME], vec![0.0f32; FRAME]);
+            let (mut before, mut after) = (0.0f64, 0.0f64);
+            for k in 0..total / FRAME {
+                for i in 0..FRAME {
+                    frame[i] = heard(k * FRAME + i);
+                    render[i] = reference(k * FRAME + i);
+                }
+                pipe.handle_render_frame(&render).unwrap();
+                pipe.process_capture_frame(&frame, &mut out).unwrap();
+                if k * FRAME >= total / 2 {
+                    before += frame.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+                    after += out.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+                }
+            }
+            (10.0 * (after / before.max(1e-12)).max(1e-12).log10()) as f32
+        }
+        eprintln!("echo left (dB re. the echo, lower is better), 12 s clip, last 6 s:");
+        eprintln!("  lag ms | extra 0 | extra lag-60 | extra lag+0");
+        let mut rows = Vec::new();
+        for lag in [60usize, 150, 300, 450] {
+            let (a, b) = (left_db(lag, 0), left_db(lag, lag.saturating_sub(60)));
+            let c = left_db(lag, lag);
+            eprintln!("  {lag:6} | {a:7.1} | {b:12.1} | {c:11.1}");
+            rows.push((lag, a, b, c));
+        }
+        // The setting must be able to move the echo: somewhere it changes the result by a clear margin.
+        let best_gain = rows.iter().map(|(_, a, b, c)| a - b.min(*c)).fold(f32::MIN, f32::max);
+        assert!(best_gain.abs() > 3.0 || rows.iter().any(|(_, a, b, c)| (a - b).abs() > 3.0 || (a - c).abs() > 3.0),
+            "the extra delay changed nothing measurable: {rows:?}");
+    }
+
     #[test]
     fn the_speaker_timeline_keeps_three_seconds() {
         let mut t = Timeline::default();
