@@ -15,7 +15,7 @@
 //! drift apart slowly, so the anchor follows the minimum when it moves by more than `REANCHOR`.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -254,8 +254,11 @@ impl Canceller {
         }
         let anchor = self.anchor.unwrap();
 
+        // The extra stream delay (Settings, 0–500 ms) pairs each phone sample with speaker audio from that much
+        // earlier, for a slow speaker path (Bluetooth speakers add 100–250 ms) that AEC3's own search misses.
+        let extra = DELAY_MS.load(Ordering::Relaxed).min(MAX_DELAY_MS) as i64 * MS;
         while self.pending.len() >= FRAME {
-            let at = anchor + self.k;
+            let at = anchor + self.k - extra;
             let known = self.tap.timeline.lock().unwrap().known(now);
             if at + FRAME as i64 > known {
                 // The speaker recording is a few ms behind: wait for it, but never hold the mic back for long.
@@ -291,9 +294,183 @@ impl Canceller {
     }
 }
 
+/// Extra delay between the speaker reference and the phone audio, in ms (see `Canceller::process`).
+pub static DELAY_MS: AtomicU32 = AtomicU32::new(0);
+pub const MAX_DELAY_MS: u32 = 500;
+
+/// What to do with the phone's audio while echo cancelling is down (his choice, in Settings).
+pub static FALLBACK_SILENCE: AtomicBool = AtomicBool::new(false);
+
+/// Anything that can clean a stretch of phone audio; the real one is `Canceller`.
+pub trait Clean {
+    fn clean(&mut self, input: &[f32], output: &mut Vec<f32>);
+}
+
+impl Clean for Canceller {
+    fn clean(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        self.process(input, output);
+    }
+}
+
+/// Keeps echo cancelling alive. If it panics or won't build, the phone's audio carries on without it (raw, or
+/// silence, as chosen) while it is rebuilt after a short, growing wait: 0.5 s, 1 s, 2 s, 4 s, then every 8 s. A
+/// healthy half minute starts the waits over. This is the one place a fault in AEC3 or the speaker recording can
+/// land, so the mic never stalls or takes the app down with it.
+pub struct Supervised<C: Clean> {
+    make: Box<dyn FnMut() -> Option<C> + Send>,
+    inner: Option<C>,
+    failures: u32,
+    retry_at: Instant,
+    healthy_since: Instant,
+}
+
+const BACKOFF_FIRST: Duration = Duration::from_millis(500);
+const BACKOFF_MAX: Duration = Duration::from_secs(8);
+const HEALTHY: Duration = Duration::from_secs(30);
+
+impl<C: Clean> Supervised<C> {
+    pub fn new(make: impl FnMut() -> Option<C> + Send + 'static) -> Self {
+        let mut s = Supervised {
+            make: Box::new(make),
+            inner: None,
+            failures: 0,
+            retry_at: Instant::now(),
+            healthy_since: Instant::now(),
+        };
+        s.rebuild();
+        s
+    }
+
+    fn rebuild(&mut self) {
+        // `make` can panic too (a failing audio driver): that counts as a failure, not a crash.
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.make)())).unwrap_or(None);
+        match made {
+            Some(c) => {
+                self.inner = Some(c);
+                self.healthy_since = Instant::now();
+                if self.failures > 0 {
+                    log::line(format!("echo cancelling restarted (after {} failure(s))", self.failures));
+                }
+            }
+            None => self.fail("couldn't start"),
+        }
+    }
+
+    fn fail(&mut self, why: &str) {
+        self.inner = None;
+        self.failures += 1;
+        let wait = BACKOFF_FIRST.saturating_mul(1 << (self.failures - 1).min(5)).min(BACKOFF_MAX);
+        self.retry_at = Instant::now() + wait;
+        log::line(format!("echo cancelling {why}; retrying in {} ms, meanwhile {}", wait.as_millis(), if FALLBACK_SILENCE.load(Ordering::Relaxed) { "silence" } else { "the raw phone mic" }));
+    }
+
+    /// Cleaned audio out; never panics and never returns less than it was given (apart from whole-frame waits).
+    pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        if self.inner.is_none() && Instant::now() >= self.retry_at {
+            self.rebuild();
+        }
+        if let Some(c) = self.inner.as_mut() {
+            let start = output.len();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.clean(input, output)));
+            if r.is_ok() {
+                if self.failures > 0 && self.healthy_since.elapsed() >= HEALTHY {
+                    self.failures = 0;
+                }
+                return;
+            }
+            output.truncate(start);
+            self.fail("stopped (panic)");
+        }
+        if FALLBACK_SILENCE.load(Ordering::Relaxed) {
+            output.extend(std::iter::repeat(0.0).take(input.len()));
+        } else {
+            output.extend_from_slice(input);
+        }
+    }
+}
+
+impl Supervised<Canceller> {
+    /// The real thing, unless `TPL_NO_AEC` is set (A/B measurements).
+    pub fn spawn() -> Option<Self> {
+        std::env::var_os("TPL_NO_AEC").is_none().then(|| Supervised::new(Canceller::new))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Passes audio through, but panics on demand: the "kill the helper" test.
+    struct Fake {
+        die_in: Arc<Mutex<Option<u32>>>,
+    }
+
+    impl Clean for Fake {
+        fn clean(&mut self, input: &[f32], output: &mut Vec<f32>) {
+            let mut d = self.die_in.lock().unwrap();
+            if let Some(n) = d.as_mut() {
+                if *n == 0 {
+                    *d = None;
+                    drop(d);
+                    panic!("simulated AEC3 fault");
+                }
+                *n -= 1;
+            }
+            output.extend(input.iter().map(|s| s * 0.5));
+        }
+    }
+
+    /// These two tests share `FALLBACK_SILENCE`.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_killed_canceller_is_back_in_under_three_seconds_and_the_mic_never_stops() {
+        let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let die_in = Arc::new(Mutex::new(None));
+        let d = die_in.clone();
+        let mut s = Supervised::new(move || Some(Fake { die_in: d.clone() }));
+        FALLBACK_SILENCE.store(false, Ordering::Relaxed);
+        let frame = vec![0.4f32; FRAME];
+        let mut out = Vec::new();
+        s.process(&frame, &mut out);
+        assert_eq!(out[0], 0.2); // cleaned
+        *die_in.lock().unwrap() = Some(0); // the next call panics
+        let killed = Instant::now();
+        let (mut raw, mut back) = (0, None);
+        while killed.elapsed() < Duration::from_secs(4) && back.is_none() {
+            out.clear();
+            s.process(&frame, &mut out);
+            assert_eq!(out.len(), FRAME, "audio must keep flowing while it is down");
+            if out[0] == 0.4 {
+                raw += 1; // the raw phone mic stood in
+            } else if out[0] == 0.2 {
+                back = Some(killed.elapsed());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let back = back.expect("never came back");
+        eprintln!("recovered in {back:?} ({raw} raw frames meanwhile)");
+        assert!(raw > 0);
+        assert!(back < Duration::from_secs(3), "{back:?}");
+    }
+
+    #[test]
+    fn silence_stands_in_when_chosen_and_it_keeps_trying_when_it_cannot_start() {
+        let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        FALLBACK_SILENCE.store(true, Ordering::Relaxed);
+        let mut s = Supervised::new(|| -> Option<Fake> { None });
+        let frame = vec![0.4f32; FRAME];
+        let mut out = Vec::new();
+        s.process(&frame, &mut out);
+        assert_eq!(out, vec![0.0; FRAME]);
+        assert_eq!(s.failures, 1);
+        thread::sleep(BACKOFF_FIRST + Duration::from_millis(50));
+        out.clear();
+        s.process(&frame, &mut out);
+        assert_eq!(s.failures, 2, "it retried");
+        assert!(s.retry_at > Instant::now() + Duration::from_millis(500), "the wait grew");
+        FALLBACK_SILENCE.store(false, Ordering::Relaxed);
+    }
 
     #[test]
     fn the_speaker_timeline_fills_gaps_with_silence_and_skips_overlaps() {

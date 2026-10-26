@@ -119,14 +119,22 @@ impl PhoneStream {
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RATE as usize)));
         let alive = Arc::new(AtomicBool::new(true));
         let target = Arc::new(AtomicUsize::new(TARGET));
-        let (r, a, t, mut s) = (ring.clone(), alive.clone(), target.clone(), sock.try_clone()?);
-        thread::spawn(move || {
+        let (r, a, t, mut s) = (ring.clone(), alive.clone(), target.clone(), sock.try_clone()?);        thread::spawn(move || {
+            // Marks the stream dead however this thread ends, a panic included, so the mic loop reconnects or
+            // falls back to the laptop mic instead of waiting on a stream that will never deliver.
+            struct Dead(Arc<AtomicBool>);
+            impl Drop for Dead {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _dead = Dead(a);
             let mut buf = [0u8; 960];
             let mut carry: Option<u8> = None;
             let mut jitter = Jitter::default();
             // TPL_NO_AEC=1 turns echo cancelling off (for A/B measurements).
             wasapi::com_init();
-            let mut aec = if std::env::var_os("TPL_NO_AEC").is_none() { echo::Canceller::new() } else { None };
+            let mut aec = echo::Supervised::spawn();
             let (mut samples, mut clean) = (Vec::new(), Vec::new());
             loop {
                 match s.read(&mut buf) {
@@ -159,7 +167,6 @@ impl PhoneStream {
                     }
                 }
             }
-            a.store(false, Ordering::SeqCst);
         });
         Ok(PhoneStream { ring, alive, target, buffering: AtomicBool::new(true), sock })
     }
@@ -199,7 +206,27 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
     let mut block: Vec<f32> = Vec::with_capacity(RATE as usize / 10);
     let mut spare: Vec<f32> = Vec::new();
 
+    let mut last_tick = Instant::now();
+    // After a fault or a wake from sleep the audio devices come and go for a moment: reopen only once 1 s has
+    // passed without another fault.
+    let mut rebuild_at = Instant::now();
     loop {
+        // A gap this long means the laptop slept (or the process was frozen): the old handles are stale.
+        if last_tick.elapsed() > Duration::from_secs(5) {
+            let _ = events.send("mic: resumed after a pause; reopening the audio devices".into());
+            cable = None;
+            laptop = None;
+            phone = None;
+            started = false;
+            rebuild_at = Instant::now() + Duration::from_secs(1);
+        }
+        last_tick = Instant::now();
+        if cable.as_ref().is_some_and(|c| !c.healthy()) {
+            let _ = events.send("mic: the cable device went away; reopening it".into());
+            cable = None;
+            laptop = None;
+            rebuild_at = Instant::now() + Duration::from_secs(1);
+        }
         // Newest request wins.
         while let Ok(r) = rx.try_recv() {
             want = r;
@@ -216,10 +243,15 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
                 Ok(r) => want = r,
                 Err(_) => return,
             }
+            last_tick = Instant::now(); // waiting while Off is not a pause
             continue;
         }
 
         if cable.is_none() {
+            if Instant::now() < rebuild_at {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
             match wasapi::find(eRender, |n| n.contains("CABLE Input")).and_then(|(d, _)| Render::open(&d)) {
                 Ok(r) => cable = Some(r),
                 Err(e) => {

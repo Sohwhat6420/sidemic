@@ -129,6 +129,12 @@ impl Render {
         self.frames.saturating_sub(self.queued())
     }
 
+    /// False once Windows has pulled the device away (unplugged, driver restarted, resumed from sleep): every call
+    /// then fails, and `queued` would read as a full buffer for ever.
+    pub fn healthy(&self) -> bool {
+        unsafe { self.client.GetCurrentPadding().is_ok() }
+    }
+
     pub fn write(&self, mono: &[f32]) -> Result<()> {
         let n = mono.len().min(self.free() as usize);
         if n == 0 {

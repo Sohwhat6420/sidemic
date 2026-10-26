@@ -70,6 +70,9 @@ start((s) => {
     `<div class="card">${icon("phone_20_regular")}<div class="body">${esc(p.label)}<div class="sub">${p.ready ? "Also reachable over wireless debugging" : "Your phone, not reachable right now"}</div></div>` +
     `<div class="right">${p.ready ? `<span class="link" data-act="use_phone" data-arg="${esc(p.id)}">Use this phone</span>` : ""}</div></div>`).join("");
   $("phone-auto").classList.toggle("on", !!s.auto_switch);
+  $("aec-delay").textContent = `${s.aec_delay_ms} ms`;
+  $("aec-raw").style.outline = s.aec_fallback_silence ? "none" : "2px solid var(--accent)";
+  $("aec-silence").style.outline = s.aec_fallback_silence ? "2px solid var(--accent)" : "none";
   $("conn-link").textContent = s.connected ? s.link_text : "Not connected";
   $("conn-ping").textContent = s.ping_ms != null ? `${s.ping_ms} ms` : "";
   $("conn-bt").textContent = s.audio.available ? `Bluetooth, to ${s.audio.speaker}` : "Bluetooth audio isn't available (is the phone paired with this laptop?)";

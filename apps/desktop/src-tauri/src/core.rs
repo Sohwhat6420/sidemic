@@ -71,6 +71,10 @@ struct Settings {
     /// When the phone he picked isn't reachable, use the other ready phone he used last, say so, and go back when
     /// the picked one returns. Off: it only offers.
     auto_switch: bool,
+    /// Extra delay between the speaker recording and the phone audio for echo cancelling, 0–500 ms.
+    aec_delay_ms: u32,
+    /// While echo cancelling is down: false = the raw phone mic, true = silence.
+    aec_fallback_silence: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -89,6 +93,8 @@ impl Default for Settings {
             autostart_set: false,
             paused: None,
             auto_switch: false,
+            aec_delay_ms: 0,
+            aec_fallback_silence: false,
         }
     }
 }
@@ -213,6 +219,8 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
     let known: BTreeMap<String, String> =
         fs::read_to_string(data_dir.join("phone-names.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     AUTO_SWITCH.store(settings.auto_switch, Ordering::Relaxed);
+    crate::echo::DELAY_MS.store(settings.aec_delay_ms.min(crate::echo::MAX_DELAY_MS), Ordering::Relaxed);
+    crate::echo::FALLBACK_SILENCE.store(settings.aec_fallback_silence, Ordering::Relaxed);
 
     let core = Core {
         app,
@@ -560,6 +568,29 @@ impl Core {
                     self.last_menu.clear();
                 }
             }
+            "aec_delay" => {
+                // "+50" / "-50" step it; a plain number sets it.
+                let cur = self.settings.aec_delay_ms as i64;
+                let next = match arg {
+                    Some(a) if a.starts_with('+') || a.starts_with('-') => a.parse::<i64>().ok().map(|d| cur + d),
+                    Some(a) => a.parse::<i64>().ok(),
+                    None => None,
+                };
+                if let Some(n) = next {
+                    let n = n.clamp(0, crate::echo::MAX_DELAY_MS as i64) as u32;
+                    self.settings.aec_delay_ms = n;
+                    crate::echo::DELAY_MS.store(n, Ordering::Relaxed);
+                    self.save_settings();
+                    log::line(format!("echo cancelling extra delay: {n} ms"));
+                }
+            }
+            "aec_fallback" => {
+                let silence = arg == Some("silence");
+                self.settings.aec_fallback_silence = silence;
+                crate::echo::FALLBACK_SILENCE.store(silence, Ordering::Relaxed);
+                self.save_settings();
+                log::line(format!("when echo cancelling is down: {}", if silence { "silence" } else { "the raw phone mic" }));
+            }
             "toggle_auto_switch" => {
                 self.settings.auto_switch = !self.settings.auto_switch;
                 AUTO_SWITCH.store(self.settings.auto_switch, Ordering::Relaxed);
@@ -788,6 +819,8 @@ impl Core {
             "other_phones": other_phones.iter().map(|p| json!({"id": p.id, "model": p.label})).collect::<Vec<_>>(),
             "phones": phones.iter().map(|p| json!({"id": p.id, "label": p.label, "ready": p.ready, "active": p.active, "chosen": p.chosen})).collect::<Vec<_>>(),
             "auto_switch": self.settings.auto_switch,
+            "aec_delay_ms": self.settings.aec_delay_ms,
+            "aec_fallback_silence": self.settings.aec_fallback_silence,
             "device": {"name": self.name},
             "battery": if connected { self.battery } else { None },
             "charging": self.charging,

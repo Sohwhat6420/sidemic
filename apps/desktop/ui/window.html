@@ -179,6 +179,16 @@
         <div class="body">Mic delay<div class="sub">From the phone's mic to the apps on this laptop</div></div>
         <div class="right num" id="conn-delay"></div>
       </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/gauge_20_regular.svg)"></i>
+        <div class="body">Echo cancelling delay<div class="sub">Extra time allowed for the speaker's sound to reach the phone. Raise it for a slow speaker such as a Bluetooth one</div></div>
+        <div class="right"><div class="btn" data-act="aec_delay" data-arg="-50">−</div><span class="num" id="aec-delay" style="min-width:56px;text-align:center"></span><div class="btn" data-act="aec_delay" data-arg="+50">+</div></div>
+      </div>
+      <div class="card">
+        <i class="i" style="--i:url(icons/info_20_regular.svg)"></i>
+        <div class="body">If echo cancelling stops<div class="sub">It restarts by itself within a few seconds. Until then, send</div></div>
+        <div class="right"><div class="btn" id="aec-raw" data-act="aec_fallback" data-arg="raw">The phone mic as it is</div><div class="btn" id="aec-silence" data-act="aec_fallback" data-arg="silence">Silence</div></div>
+      </div>
       <div id="conn-phones"></div>
       <div class="card">
         <i class="i" style="--i:url(icons/phone_20_regular.svg)"></i>
