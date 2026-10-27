@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const OLD_FOLDER: &str = "TRUE Phone Link";
 const OLD_RUN_VALUE: &str = "TRUE Phone Link";
+/// The autostart plugin names its Run value after the product.
+const RUN_VALUE: &str = "Sidemic";
 const OLD_WATCHER_VALUE: &str = "TRUE Phone Link watcher";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const MARKER: &str = "legacy-cleaned";
@@ -70,6 +72,68 @@ fn reg(args: &[&str]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// The program path inside a Run value's data: `"C:\x\a.exe" --autostart` or `C:\x\a.exe --autostart`.
+pub fn run_value_exe(data: &str) -> Option<PathBuf> {
+    let d = data.trim();
+    if let Some(rest) = d.strip_prefix('"') {
+        return rest.split('"').next().filter(|p| !p.is_empty()).map(PathBuf::from);
+    }
+    let end = d.to_ascii_lowercase().find(".exe")? + ".exe".len();
+    Some(PathBuf::from(&d[..end]))
+}
+
+/// True when a Run value's data starts some other program than `exe` (compared case-blind, ignoring a `\\?\`
+/// prefix and forward slashes).
+pub fn points_elsewhere(data: &str, exe: &Path) -> bool {
+    let norm = |p: &Path| {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        real.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").to_ascii_lowercase()
+    };
+    match run_value_exe(data) {
+        Some(target) => norm(&target) != norm(exe),
+        None => true,
+    }
+}
+
+/// The data of our own "Sidemic" Run value, or None when there is none (autostart off, or never set).
+fn run_value_data() -> Option<String> {
+    let out = Command::new("reg")
+        .args(["query", RUN_KEY, "/v", RUN_VALUE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_reg_query(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The data of the "Sidemic" value in `reg query` output (`    Sidemic    REG_SZ    <data>`).
+fn parse_reg_query(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let (name, data) = l.split_once("REG_SZ").or_else(|| l.split_once("REG_EXPAND_SZ"))?;
+        (name.trim() == RUN_VALUE).then(|| data.trim().to_string())
+    })
+}
+
+/// Release starts only: true when our own "Sidemic" Run value exists but starts a different exe (a test install
+/// that was later deleted or moved leaves it pointing nowhere, so sign-in would start nothing). A missing value is
+/// left alone, since that means the user turned start at sign-in off. The caller rewrites it through the autostart
+/// plugin, which only ever touches the "Sidemic" value.
+pub fn run_value_is_stale() -> bool {
+    if cfg!(debug_assertions) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    match run_value_data() {
+        Some(data) if points_elsewhere(&data, &exe) => {
+            crate::log::line(format!("legacy: the \"{RUN_VALUE}\" Run value pointed at {data}, not at this exe; rewriting it"));
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Runs once per data folder. Returns true when it removed an old "TRUE Phone Link" Run value, i.e. the old install
@@ -169,6 +233,53 @@ mod tests {
         assert!(old.exists());
         assert!(notes.iter().any(|n| n.contains("folder kept")), "{notes:?}");
         let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn the_exe_is_read_out_of_a_run_value_quoted_or_not() {
+        let a = r#""C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe" --autostart"#;
+        let b = r"C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe --autostart";
+        let want = PathBuf::from(r"C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe");
+        assert_eq!(run_value_exe(a), Some(want.clone()));
+        assert_eq!(run_value_exe(b), Some(want));
+        assert_eq!(run_value_exe(""), None);
+        assert_eq!(run_value_exe("garbage"), None);
+    }
+
+    #[test]
+    fn a_run_value_for_this_exe_is_left_alone_whatever_its_spelling() {
+        let exe = Path::new(r"C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe");
+        assert!(!points_elsewhere(r#""C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe" --autostart"#, exe));
+        assert!(!points_elsewhere(r"c:/users/e/appdata/local/sidemic/TRUE-PHONE-LINK.EXE --autostart", exe));
+    }
+
+    #[test]
+    fn a_run_value_pointing_at_a_deleted_or_other_exe_is_stale() {
+        let exe = Path::new(r"C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe");
+        assert!(points_elsewhere(r"C:\Users\e\AppData\Local\TRUE Phone Link\true-phone-link.exe --autostart", exe));
+        assert!(points_elsewhere(r"C:\Other\sidemic-test.exe --autostart", exe));
+        assert!(points_elsewhere("", exe));
+    }
+
+    #[test]
+    fn reg_query_output_is_read_and_only_our_own_value_counts() {
+        let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n    Sidemic    REG_SZ    C:\\x\\true-phone-link.exe --autostart\r\n\r\n";
+        assert_eq!(parse_reg_query(out).as_deref(), Some(r"C:\x\true-phone-link.exe --autostart"));
+        let other = "\r\nHKEY...\\Run\r\n    Sidemic watcher    REG_SZ    pythonw.exe tpl-watch.pyw\r\n";
+        // "Sidemic watcher" is a different value; the query asks for /v Sidemic so it cannot appear, but if it did
+        // the parser must not hand its data to the repair.
+        assert_eq!(parse_reg_query(other), None);
+        assert_eq!(parse_reg_query("ERROR: not found"), None);
+    }
+
+    #[test]
+    fn a_real_file_behind_a_different_spelling_is_not_stale() {
+        let dir = scratch("runval");
+        let exe = dir.join("true-phone-link.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let canon = std::fs::canonicalize(&exe).unwrap();
+        assert!(!points_elsewhere(&format!("\"{}\" --autostart", canon.display()), &exe));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
