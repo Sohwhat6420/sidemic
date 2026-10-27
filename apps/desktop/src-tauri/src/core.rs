@@ -466,21 +466,9 @@ impl Core {
         }
     }
 
-    /// Which paired Bluetooth source is this phone. Windows lists the phone under its Bluetooth name, which can
-    /// differ from the name in Settings (on HyperOS it does by default), so a known Bluetooth name is the only
-    /// thing to match. Without one, try the names the phone gave, and let the one paired source stand in for it.
-    /// With no phone connected at all, there is nobody to play to: nothing matches.
+    /// Which paired Bluetooth source is this phone (see `hint_for`).
     fn a2dp_hint(&self) -> winrt::Hint {
-        if !self.phone.bt_name.is_empty() {
-            return winrt::Hint { names: vec![self.phone.bt_name.clone()], lone_ok: false };
-        }
-        let mut names: Vec<String> = Vec::new();
-        for n in [self.name.clone().unwrap_or_default(), self.phone.model.clone()] {
-            if !n.is_empty() && !names.contains(&n) {
-                names.push(n);
-            }
-        }
-        winrt::Hint { lone_ok: !names.is_empty(), names }
+        hint_for(&self.phone.bt_name, self.name.as_deref().unwrap_or(""), &self.phone.model)
     }
 
     fn send_a2dp_hint(&self) {
@@ -1170,6 +1158,24 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
 // ---------------------------------------------------------------------------------------------------------
 // Bluetooth audio: open and close the phone's A2DP link, and notice when it drops.
 
+/// The names a phone is looked for under among the paired Bluetooth sources. Windows lists the phone under its
+/// Bluetooth name, which can differ from the name in Settings (on HyperOS it does by default), so a known Bluetooth
+/// name is the only thing to match. Without one (Bluetooth off when the phone said hello, or an older phone server),
+/// the name and model it gave are tried. There is no "the one paired source will do" fallback: it opened the wrong
+/// phone on 27 Oct 2026. With no phone introduced at all there is nobody to play to, so nothing matches.
+fn hint_for(bt_name: &str, name: &str, model: &str) -> winrt::Hint {
+    if !bt_name.is_empty() {
+        return winrt::Hint { names: vec![bt_name.to_string()] };
+    }
+    let mut names: Vec<String> = Vec::new();
+    for n in [name, model] {
+        if !n.is_empty() && !names.iter().any(|x| x == n) {
+            names.push(n.to_string());
+        }
+    }
+    winrt::Hint { names }
+}
+
 enum A2dpCmd {
     /// Which phone to look for; "available" means that phone is paired, not that some phone is.
     Hint(winrt::Hint),
@@ -1186,13 +1192,26 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
     let mut available = false;
     let mut hint = winrt::Hint::default();
     let mut next_scan = Instant::now();
+    // Seconds to wait before saying "available" again after a failed open or a drop (5, 10, ... 120): a paired phone
+    // that can't be reached (Bluetooth off, out of range) would otherwise be retried, and toasted, every few seconds.
+    let mut backoff = 0u64;
+    let mut closed_for_switch = false;
     loop {
         let mut error = None;
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(A2dpCmd::Hint(h)) => {
                 if h != hint {
+                    log::line(format!("bluetooth audio looks for {:?}", h.names));
+                    // A different phone: an open link to the old one must not be taken for the new one's. An empty
+                    // hint (adb lost the phone for a moment) changes nothing: the link carries on.
+                    if link.is_open() && !h.names.is_empty() && !h.matches(link.open_name()) {
+                        log::line(format!("bluetooth audio closed: it was {}, not the phone now in use", link.open_name()));
+                        link.close();
+                        closed_for_switch = true;
+                    }
                     hint = h;
-                    next_scan = Instant::now(); // a different phone: look again now
+                    backoff = 0;
+                    next_scan = Instant::now(); // look again now
                 }
             }
             Ok(A2dpCmd::Open) => {
@@ -1201,7 +1220,10 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
                 if let Err(e) = r {
                     error = Some(e);
                     available = false; // tells the engine phone audio is still on the phone
-                    next_scan = Instant::now() + Duration::from_secs(5);
+                    backoff = (backoff * 2).clamp(5, 120);
+                    next_scan = Instant::now() + Duration::from_secs(backoff);
+                } else {
+                    backoff = 0;
                 }
             }
             Ok(A2dpCmd::Close) => {
@@ -1212,13 +1234,20 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
             Err(RecvTimeoutError::Disconnected) => return,
         }
         let mut now_available = available;
-        if link.is_open() && !link.is_live() {
+        if closed_for_switch {
+            // Tell the engine the speaker link is gone (it opens again for the new phone once that is seen paired).
+            closed_for_switch = false;
+            now_available = false;
+            next_scan = Instant::now() + Duration::from_secs(1);
+        } else if link.is_open() && !link.is_live() {
             log::line(format!("bluetooth audio dropped, state {:?}", link.state()));
             link.close();
             now_available = false;
-            next_scan = Instant::now() + Duration::from_secs(5);
+            backoff = (backoff * 2).clamp(5, 120);
+            next_scan = Instant::now() + Duration::from_secs(backoff);
         } else if Instant::now() >= next_scan {
             now_available = match &bt_watch {
+                _ if link.is_open() => true, // a live link is available whatever the hint says now
                 Some(w) => w.has(&hint),
                 // No watcher (it failed to start): fall back to a full search once a minute.
                 None => winrt::A2dp::devices().is_ok_and(|d| winrt::pick_device(d, &hint).is_ok()),
@@ -1330,7 +1359,37 @@ fn diff(old: &mut BTreeSet<String>, new: BTreeSet<String>, tx: &Sender<Msg>, mk:
 
 #[cfg(test)]
 mod tests {
-    use super::refusal_hint;
+    use super::{hint_for, refusal_hint};
+
+    #[test]
+    fn a_known_bluetooth_name_is_the_only_thing_looked_for() {
+        let h = hint_for("POCO X6 Pro 5G", "Ethan's POCO", "23122PCD1G");
+        assert_eq!(h.names, vec!["POCO X6 Pro 5G".to_string()]);
+    }
+
+    #[test]
+    fn without_a_bluetooth_name_the_name_and_model_are_tried_and_no_lone_device_stands_in() {
+        // HyperOS sends bt:"" when Bluetooth is off: the S24 (the only paired source) must still not match
+        let h = hint_for("", "POCO X6 Pro", "23122PCD1G");
+        assert_eq!(h.names, vec!["POCO X6 Pro".to_string(), "23122PCD1G".to_string()]);
+        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra"]), None);
+        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra", "POCO X6 Pro 5G"]), Some(1));
+    }
+
+    #[test]
+    fn before_any_hello_nothing_matches() {
+        let h = hint_for("", "", "");
+        assert!(h.names.is_empty());
+        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra"]), None);
+        assert_eq!(hint_for("", "Same", "Same").names.len(), 1);
+    }
+
+    #[test]
+    fn an_open_link_is_kept_for_the_phone_it_goes_to_and_not_for_another() {
+        let poco = hint_for("POCO X6 Pro 5G", "", "");
+        assert!(poco.matches("POCO X6 Pro 5G"));
+        assert!(!poco.matches("Ethan's Galaxy S24 Ultra"));
+    }
 
     #[test]
     fn refusals_name_the_brands_switch() {
