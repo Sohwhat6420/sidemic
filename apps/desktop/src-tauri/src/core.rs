@@ -421,6 +421,7 @@ impl Core {
                     self.wallpaper = None;
                     self.phone = PhoneInfo::default();
                     self.phone_warning = None;
+                    self.send_a2dp_hint();
                 }
                 self.roster = Roster { ready, chosen, active };
                 self.check_chosen_missing();
@@ -465,7 +466,29 @@ impl Core {
         }
     }
 
+    /// Which paired Bluetooth source is this phone. Windows lists the phone under its Bluetooth name, which can
+    /// differ from the name in Settings (on HyperOS it does by default), so a known Bluetooth name is the only
+    /// thing to match. Without one, try the names the phone gave, and let the one paired source stand in for it.
+    /// With no phone connected at all, there is nobody to play to: nothing matches.
+    fn a2dp_hint(&self) -> winrt::Hint {
+        if !self.phone.bt_name.is_empty() {
+            return winrt::Hint { names: vec![self.phone.bt_name.clone()], lone_ok: false };
+        }
+        let mut names: Vec<String> = Vec::new();
+        for n in [self.name.clone().unwrap_or_default(), self.phone.model.clone()] {
+            if !n.is_empty() && !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        winrt::Hint { lone_ok: !names.is_empty(), names }
+    }
+
+    fn send_a2dp_hint(&self) {
+        let _ = self.a2dp_tx.send(A2dpCmd::Hint(self.a2dp_hint()));
+    }
+
     fn link_changed(&mut self) {
+        self.send_a2dp_hint();
         let (mic_link, a2dp_available) = (self.ctl.connected(), self.a2dp_available);
         self.feed(Event::PhoneLink { mic_link, a2dp_available });
     }
@@ -503,14 +526,8 @@ impl Core {
             }
             Action::OpenA2dp => {
                 self.a2dp_error = None;
-                // Windows lists the phone under its Bluetooth name, which can differ from the name in Settings
-                // (on HyperOS it does by default), so that comes first.
-                let hint = [&self.phone.bt_name, self.name.as_ref().unwrap_or(&String::new()), &self.phone.model]
-                    .into_iter()
-                    .find(|s| !s.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| winrt::UNKNOWN_PHONE.into());
-                let _ = self.a2dp_tx.send(A2dpCmd::Open(hint));
+                self.send_a2dp_hint();
+                let _ = self.a2dp_tx.send(A2dpCmd::Open);
             }
             Action::CloseA2dp => {
                 let _ = self.a2dp_tx.send(A2dpCmd::Close);
@@ -1154,7 +1171,9 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
 // Bluetooth audio: open and close the phone's A2DP link, and notice when it drops.
 
 enum A2dpCmd {
-    Open(String),
+    /// Which phone to look for; "available" means that phone is paired, not that some phone is.
+    Hint(winrt::Hint),
+    Open,
     Close,
 }
 
@@ -1165,13 +1184,20 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
     // Let the watcher report the devices that are already there before the first check.
     thread::sleep(Duration::from_millis(500));
     let mut available = false;
+    let mut hint = winrt::Hint::default();
     let mut next_scan = Instant::now();
     loop {
         let mut error = None;
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(A2dpCmd::Open(hint)) => {
+            Ok(A2dpCmd::Hint(h)) => {
+                if h != hint {
+                    hint = h;
+                    next_scan = Instant::now(); // a different phone: look again now
+                }
+            }
+            Ok(A2dpCmd::Open) => {
                 let r = link.open(&hint);
-                log::line(format!("bluetooth audio open ({hint}): {r:?}"));
+                log::line(format!("bluetooth audio open ({:?}): {r:?}", hint.names));
                 if let Err(e) = r {
                     error = Some(e);
                     available = false; // tells the engine phone audio is still on the phone
@@ -1193,9 +1219,9 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
             next_scan = Instant::now() + Duration::from_secs(5);
         } else if Instant::now() >= next_scan {
             now_available = match &bt_watch {
-                Some(w) => w.any(),
+                Some(w) => w.has(&hint),
                 // No watcher (it failed to start): fall back to a full search once a minute.
-                None => winrt::A2dp::devices().is_ok_and(|d| !d.is_empty()),
+                None => winrt::A2dp::devices().is_ok_and(|d| winrt::pick_device(d, &hint).is_ok()),
             };
             next_scan = Instant::now() + Duration::from_secs(if bt_watch.is_some() { 2 } else { 60 });
         }

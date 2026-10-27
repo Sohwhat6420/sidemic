@@ -80,7 +80,9 @@ pub fn run_value_exe(data: &str) -> Option<PathBuf> {
     if let Some(rest) = d.strip_prefix('"') {
         return rest.split('"').next().filter(|p| !p.is_empty()).map(PathBuf::from);
     }
-    let end = d.to_ascii_lowercase().find(".exe")? + ".exe".len();
+    // The first ".exe" that ends the path: followed by whitespace or the end, so a folder like `a.exeter` is not cut.
+    let lower = d.to_ascii_lowercase();
+    let end = lower.match_indices(".exe").map(|(i, m)| i + m.len()).find(|&e| d[e..].chars().next().is_none_or(char::is_whitespace))?;
     Some(PathBuf::from(&d[..end]))
 }
 
@@ -271,6 +273,13 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_with_exe_inside_its_name_does_not_cut_the_path_short() {
+        let d = r"C:\Users\a.exeter\AppData\Local\Sidemic\true-phone-link.exe --autostart";
+        assert_eq!(run_value_exe(d), Some(PathBuf::from(r"C:\Users\a.exeter\AppData\Local\Sidemic\true-phone-link.exe")));
+        assert_eq!(run_value_exe(r"C:\x\app.exe"), Some(PathBuf::from(r"C:\x\app.exe")));
+    }
+
+    #[test]
     fn a_value_whose_exe_is_gone_is_repaired_but_one_whose_exe_exists_is_not() {
         let dir = scratch("repair");
         let live_other = dir.join("sdm-ab.exe");
@@ -288,6 +297,11 @@ mod tests {
         assert!(should_repair(&exists, &running, Some(&running)));
         // an empty or unreadable value is repaired
         assert!(should_repair("", &running, None));
+        // the production case: an install exists and differs from the running exe, whose own target still exists
+        let install = dir.join("install.exe");
+        std::fs::write(&install, b"x").unwrap();
+        assert!(!should_repair(&exists, &running, Some(&install)));
+        assert!(should_repair(&gone, &running, Some(&install)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

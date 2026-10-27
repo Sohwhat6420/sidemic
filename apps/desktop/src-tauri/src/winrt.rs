@@ -40,13 +40,13 @@ impl A2dp {
         self.conn.is_some()
     }
 
-    /// Opens the link to the device whose name contains `name_hint` (e.g. "Galaxy S24 Ultra").
-    pub fn open(&mut self, name_hint: &str) -> std::result::Result<String, String> {
+    /// Opens the link to the paired source `hint` describes (e.g. "Galaxy S24 Ultra"); never to another phone.
+    pub fn open(&mut self, hint: &Hint) -> std::result::Result<String, String> {
         if self.conn.is_some() {
             return Ok("already open".into());
         }
         let devices = Self::devices().map_err(|e| e.to_string())?;
-        let (id, name) = pick_device(devices, name_hint)?;
+        let (id, name) = pick_device(devices, hint)?;
         let conn = AudioPlaybackConnection::TryCreateFromId(&id).map_err(|e| e.to_string())?;
         conn.StartAsync().and_then(|a| a.join()).map_err(|e| e.to_string())?;
         let result = conn.OpenAsync().and_then(|a| a.join()).map_err(|e| e.to_string())?;
@@ -87,18 +87,19 @@ impl A2dp {
 /// `--probe bt-scan`); the watcher costs nothing until a device comes or goes.
 pub struct BtWatch {
     watcher: windows::Devices::Enumeration::DeviceWatcher,
-    ids: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Paired source id -> name.
+    ids: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 impl BtWatch {
     pub fn start() -> Result<BtWatch> {
         use windows::Devices::Enumeration::{DeviceInformationUpdate, DeviceWatcher};
         let watcher = DeviceInformation::CreateWatcherAqsFilter(&AudioPlaybackConnection::GetDeviceSelector()?)?;
-        let ids = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let ids = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         let added = ids.clone();
         watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, d| {
             if let Ok(d) = d.ok() {
-                added.lock().unwrap().insert(d.Id()?.to_string());
+                added.lock().unwrap().insert(d.Id()?.to_string(), d.Name()?.to_string());
             }
             Ok(())
         }))?;
@@ -117,6 +118,13 @@ impl BtWatch {
 
     pub fn any(&self) -> bool {
         !self.ids.lock().unwrap().is_empty()
+    }
+
+    /// Whether the phone `hint` describes is among the paired sources right now.
+    pub fn has(&self, hint: &Hint) -> bool {
+        let map = self.ids.lock().unwrap();
+        let names: Vec<&str> = map.values().map(String::as_str).collect();
+        hint.pick(&names).is_some()
     }
 }
 
@@ -220,21 +228,43 @@ pub fn foreground() -> (Option<String>, bool) {
     }
 }
 
-/// Which paired Bluetooth audio source is the phone called `name_hint`. A name that matches nothing is NOT a
-/// reason to take the one device that is paired: on 27 Oct 2026 the POCO was unpaired and the only paired source was
-/// Ethan's Galaxy S24 Ultra, which the app then opened. The lone device is taken only when the phone's name is not
-/// known at all (the hint is the placeholder "phone").
-pub fn pick_device(devices: Vec<(windows::core::HSTRING, String)>, name_hint: &str) -> std::result::Result<(windows::core::HSTRING, String), String> {
-    let only = (devices.len() == 1 && name_hint == UNKNOWN_PHONE).then(|| devices[0].clone());
-    devices
-        .into_iter()
-        .find(|(_, n)| n.contains(name_hint) || (!n.is_empty() && name_hint.contains(n.as_str())))
-        .or(only)
-        .ok_or_else(|| format!("phone not paired: no Bluetooth audio device named like \"{name_hint}\" (pair it in Windows first)"))
+/// Who to look for among the paired Bluetooth audio sources.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hint {
+    /// Names the phone is known by; a paired source matches when its name contains one, or one contains its name.
+    pub names: Vec<String>,
+    /// Take the one paired source whatever it is called. Only for a phone that has introduced itself but whose
+    /// Bluetooth name we could not learn (an older phone server): otherwise an unpaired phone would be played to
+    /// whichever other phone happens to be paired (27 Oct 2026: the POCO was unpaired, so the app opened the S24).
+    pub lone_ok: bool,
 }
 
-/// What `core.rs` passes as the hint when the phone has told us no name at all.
-pub const UNKNOWN_PHONE: &str = "phone";
+impl Hint {
+    /// Index of the paired source this hint means, among the sources' names.
+    pub fn pick(&self, names: &[&str]) -> Option<usize> {
+        names
+            .iter()
+            .position(|n| self.names.iter().any(|h| n.contains(h.as_str()) || (!n.is_empty() && h.contains(n))))
+            .or_else(|| (self.lone_ok && names.len() == 1).then_some(0))
+    }
+
+    fn describe(&self) -> String {
+        if self.names.is_empty() {
+            "no phone has introduced itself yet".into()
+        } else {
+            format!("no Bluetooth audio device named like {:?}", self.names)
+        }
+    }
+}
+
+/// Which paired Bluetooth audio source is the phone `hint` describes, or "phone not paired".
+pub fn pick_device(devices: Vec<(HSTRING, String)>, hint: &Hint) -> std::result::Result<(HSTRING, String), String> {
+    let names: Vec<&str> = devices.iter().map(|(_, n)| n.as_str()).collect();
+    match hint.pick(&names) {
+        Some(i) => Ok(devices[i].clone()),
+        None => Err(format!("phone not paired: {} (pair it in Windows first)", hint.describe())),
+    }
+}
 
 #[cfg(test)]
 mod pick_tests {
@@ -244,25 +274,43 @@ mod pick_tests {
         (HSTRING::from(id), name.to_string())
     }
 
+    fn hint(names: &[&str], lone_ok: bool) -> Hint {
+        Hint { names: names.iter().map(|s| s.to_string()).collect(), lone_ok }
+    }
+
     #[test]
     fn the_phone_is_found_by_its_name() {
         let both = vec![dev("a", "Ethan's Galaxy S24 Ultra"), dev("b", "POCO X6 Pro 5G")];
-        assert_eq!(pick_device(both, "POCO X6 Pro 5G").unwrap().1, "POCO X6 Pro 5G");
+        assert_eq!(pick_device(both, &hint(&["POCO X6 Pro 5G"], false)).unwrap().1, "POCO X6 Pro 5G");
     }
 
     #[test]
     fn an_unpaired_phone_does_not_take_over_the_one_device_that_is_paired() {
         // 27 Oct 2026: the POCO was not paired, the S24 was the only source, and the app opened the S24.
         let only_s24 = vec![dev("a", "Ethan's Galaxy S24 Ultra")];
-        let err = pick_device(only_s24, "POCO X6 Pro 5G").unwrap_err();
+        let err = pick_device(only_s24, &hint(&["POCO X6 Pro 5G"], false)).unwrap_err();
         assert!(err.contains("phone not paired"), "{err}");
     }
 
     #[test]
-    fn a_phone_that_told_us_no_name_still_gets_the_lone_device() {
-        let only = vec![dev("a", "Some Phone")];
-        assert_eq!(pick_device(only, UNKNOWN_PHONE).unwrap().1, "Some Phone");
-        let two = vec![dev("a", "One"), dev("b", "Two")];
-        assert!(pick_device(two, UNKNOWN_PHONE).is_err());
+    fn nothing_is_opened_before_a_phone_has_introduced_itself() {
+        let only_s24 = vec![dev("a", "Ethan's Galaxy S24 Ultra")];
+        let err = pick_device(only_s24, &Hint::default()).unwrap_err();
+        assert!(err.contains("phone not paired") && err.contains("introduced"), "{err}");
+    }
+
+    #[test]
+    fn a_phone_whose_bluetooth_name_we_never_learned_gets_the_lone_device_but_only_the_lone_one() {
+        // hello arrived, but with no Bluetooth name: the names we have don't match what Windows lists
+        let h = hint(&["Ethan's POCO", "2312DPC1"], true);
+        assert_eq!(pick_device(vec![dev("a", "POCO X6 Pro 5G")], &h).unwrap().1, "POCO X6 Pro 5G");
+        assert!(pick_device(vec![dev("a", "One"), dev("b", "Two")], &h).is_err());
+    }
+
+    #[test]
+    fn any_known_name_may_match() {
+        let h = hint(&["Ethan's POCO", "POCO X6"], false);
+        assert_eq!(h.pick(&["Galaxy S24", "POCO X6 Pro 5G"]), Some(1));
+        assert_eq!(h.pick(&[]), None);
     }
 }
