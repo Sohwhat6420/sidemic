@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod a2dp_sm;
 mod adb;
 mod core;
 mod echo;

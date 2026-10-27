@@ -698,6 +698,28 @@ fn audio_modes_and_rule10_connectivity() {
             },
         ),
         case(
+            "The app closes the speaker link on purpose (phone switch) -> back on the phone, no 'dropped' toast",
+            [
+                on_speaker(),
+                vec![
+                    st(2_000, sound(DISCORD, true), vec![DuckPhone]),
+                    st(3_000, Event::SpeakerLinkClosed, vec![UnduckPhone]),
+                    st(3_000, link(true, false), vec![]),
+                    st(11_000, HandBack, vec![]),
+                ],
+            ]
+            .concat(),
+            |e| {
+                assert_eq!(e.state().phone_audio, Placement::Phone);
+                assert!(!e.state().phone_ducked);
+            },
+        ),
+        case(
+            "Closing the speaker link on purpose while nothing is on it is a no-op",
+            vec![st(0, link(true, true), vec![]), st(1_000, Event::SpeakerLinkClosed, vec![])],
+            |e| assert_eq!(e.state().phone_audio, Placement::Phone),
+        ),
+        case(
             "Bluetooth gone after a hand-back -> Keep cannot reopen",
             [handed_back(), vec![st(13_500, link(true, false), vec![]), st(14_000, Keep, vec![])]].concat(),
             |e| assert_eq!(e.memory().keep_count(CHROME), 0),

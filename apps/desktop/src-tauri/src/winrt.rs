@@ -247,9 +247,13 @@ pub struct Hint {
 }
 
 impl Hint {
-    /// Index of the paired source this hint means, among the sources' names.
+    /// Index of the paired source this hint means, among the sources' names. A source named exactly like one of the
+    /// hint's names wins over one that only contains it ("POCO X6 Pro" is both a name and a part of "POCO X6 Pro 5G").
     pub fn pick(&self, names: &[&str]) -> Option<usize> {
-        names.iter().position(|n| self.matches(n))
+        names
+            .iter()
+            .position(|n| self.names.iter().any(|h| h == n))
+            .or_else(|| names.iter().position(|n| self.matches(n)))
     }
 
     pub fn matches(&self, name: &str) -> bool {
@@ -312,5 +316,14 @@ mod pick_tests {
         let h = hint(&["Ethan's POCO", "POCO X6"]);
         assert_eq!(h.pick(&["Galaxy S24", "POCO X6 Pro 5G"]), Some(1));
         assert_eq!(h.pick(&[]), None);
+    }
+
+    #[test]
+    fn an_exact_name_beats_a_longer_one_that_merely_contains_it() {
+        let h = hint(&["POCO X6 Pro"]);
+        // listed first, but only a substring match
+        assert_eq!(h.pick(&["POCO X6 Pro 5G (spare)", "POCO X6 Pro"]), Some(1));
+        // no exact name: the substring match still works
+        assert_eq!(h.pick(&["Galaxy S24", "POCO X6 Pro 5G"]), Some(1));
     }
 }

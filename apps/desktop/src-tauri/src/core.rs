@@ -28,7 +28,7 @@ use crate::{log, wasapi, winrt};
 pub enum Msg {
     Phone(PhoneEvent),
     Link(Link),
-    A2dp { available: bool, error: Option<String> },
+    A2dp { available: bool, error: Option<String>, quiet: bool },
     Laptop(Event),
     Act { action: String, arg: Option<String> },
     MicNote(String),
@@ -393,7 +393,11 @@ impl Core {
                     self.link_changed();
                 }
             }
-            Msg::A2dp { available, error } => {
+            Msg::A2dp { available, error, quiet } => {
+                if quiet {
+                    // The app closed the link for a phone switch: not a drop, so no "dropped" toast.
+                    self.feed(Event::SpeakerLinkClosed);
+                }
                 if let Some(e) = &error {
                     log::line(format!("bluetooth audio error: {e}"));
                 }
@@ -415,15 +419,16 @@ impl Core {
             }
             Msg::Act { action, arg } => self.act(&action, arg.as_deref()),
             Msg::Roster { ready, chosen, active } => {
-                if active != self.roster.active && self.roster.active.is_some() {
+                let moved = active != self.roster.active && self.roster.active.is_some();
+                self.roster = Roster { ready, chosen, active };
+                if moved {
                     // The link moved to another phone: forget what the last one said about itself.
                     self.name = None;
                     self.wallpaper = None;
                     self.phone = PhoneInfo::default();
                     self.phone_warning = None;
-                    self.send_a2dp_hint();
+                    self.send_a2dp_hint(); // carries the new roster id
                 }
-                self.roster = Roster { ready, chosen, active };
                 self.check_chosen_missing();
             }
             Msg::Notice { text, buttons } => {
@@ -472,7 +477,7 @@ impl Core {
     }
 
     fn send_a2dp_hint(&self) {
-        let _ = self.a2dp_tx.send(A2dpCmd::Hint(self.a2dp_hint()));
+        let _ = self.a2dp_tx.send(A2dpCmd::Hint(self.a2dp_hint(), self.roster.active.clone()));
     }
 
     fn link_changed(&mut self) {
@@ -644,8 +649,12 @@ impl Core {
                 AudioMode::Phone => MicMode::Phone,
                 AudioMode::Laptop => MicMode::Laptop,
             })),
-            "audio_mode" => self.set_audio_mode(parse_mode(arg).unwrap_or(AudioMode::Auto)),
+            "audio_mode" => {
+                let _ = self.a2dp_tx.send(A2dpCmd::Retry); // don't wait out an old backoff
+                self.set_audio_mode(parse_mode(arg).unwrap_or(AudioMode::Auto));
+            }
             "toggle_audio" => {
+                let _ = self.a2dp_tx.send(A2dpCmd::Retry);
                 if st.phone_audio == Placement::Speaker {
                     if st.audio_mode == AudioMode::Laptop {
                         self.set_audio_mode(AudioMode::Auto);
@@ -1177,10 +1186,13 @@ fn hint_for(bt_name: &str, name: &str, model: &str) -> winrt::Hint {
 }
 
 enum A2dpCmd {
-    /// Which phone to look for; "available" means that phone is paired, not that some phone is.
-    Hint(winrt::Hint),
+    /// Which phone to look for (its names, and the roster id of the phone in use); "available" means that phone
+    /// is paired, not that some phone is.
+    Hint(winrt::Hint, Option<String>),
     Open,
     Close,
+    /// Look for the phone now, whatever wait a failed open or a drop has left.
+    Retry,
 }
 
 fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
@@ -1189,74 +1201,55 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
     let bt_watch = winrt::BtWatch::start().map_err(|e| log::line(format!("bluetooth device watcher didn't start: {e}"))).ok();
     // Let the watcher report the devices that are already there before the first check.
     thread::sleep(Duration::from_millis(500));
-    let mut available = false;
     let mut hint = winrt::Hint::default();
-    let mut next_scan = Instant::now();
-    // Seconds to wait before saying "available" again after a failed open or a drop (5, 10, ... 120): a paired phone
-    // that can't be reached (Bluetooth off, out of range) would otherwise be retried, and toasted, every few seconds.
-    let mut backoff = 0u64;
-    let mut closed_for_switch = false;
+    // The decisions (what is available, how long to wait after a failure, when to close for a switch) are in
+    // a2dp_sm, where they are tested; this loop only carries them out.
+    let mut sm = crate::a2dp_sm::Machine::new(Instant::now());
+    let rescan = Duration::from_secs(if bt_watch.is_some() { 2 } else { 60 });
     loop {
+        let before = sm.available;
         let mut error = None;
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(A2dpCmd::Hint(h)) => {
-                if h != hint {
+            Ok(A2dpCmd::Hint(h, phone)) => {
+                let changed = h != hint;
+                if changed {
                     log::line(format!("bluetooth audio looks for {:?}", h.names));
-                    // A different phone: an open link to the old one must not be taken for the new one's. An empty
-                    // hint (adb lost the phone for a moment) changes nothing: the link carries on.
-                    if link.is_open() && !h.names.is_empty() && !h.matches(link.open_name()) {
-                        log::line(format!("bluetooth audio closed: it was {}, not the phone now in use", link.open_name()));
-                        link.close();
-                        closed_for_switch = true;
-                    }
-                    hint = h;
-                    backoff = 0;
-                    next_scan = Instant::now(); // look again now
                 }
+                let open_matches = link.is_open() && h.matches(link.open_name());
+                if sm.on_hint(Instant::now(), phone, h.names.is_empty(), changed, link.is_open(), open_matches) {
+                    log::line(format!("bluetooth audio closed: it was {}, not the phone now in use", link.open_name()));
+                    link.close();
+                }
+                hint = h;
             }
             Ok(A2dpCmd::Open) => {
                 let r = link.open(&hint);
                 log::line(format!("bluetooth audio open ({:?}): {r:?}", hint.names));
-                if let Err(e) = r {
-                    error = Some(e);
-                    available = false; // tells the engine phone audio is still on the phone
-                    backoff = (backoff * 2).clamp(5, 120);
-                    next_scan = Instant::now() + Duration::from_secs(backoff);
-                } else {
-                    backoff = 0;
-                }
+                sm.on_open(Instant::now(), r.is_ok());
+                error = r.err();
             }
             Ok(A2dpCmd::Close) => {
                 log::line("bluetooth audio closed");
                 link.close();
+                sm.on_close();
             }
+            Ok(A2dpCmd::Retry) => sm.on_retry(Instant::now()),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        let mut now_available = available;
-        if closed_for_switch {
-            // Tell the engine the speaker link is gone (it opens again for the new phone once that is seen paired).
-            closed_for_switch = false;
-            now_available = false;
-            next_scan = Instant::now() + Duration::from_secs(1);
-        } else if link.is_open() && !link.is_live() {
+        let (open, live) = (link.is_open(), link.is_open() && link.is_live());
+        let t = sm.tick(Instant::now(), open, live, rescan, || match &bt_watch {
+            Some(w) => w.has(&hint),
+            // No watcher (it failed to start): fall back to a full search once a minute.
+            None => winrt::A2dp::devices().is_ok_and(|d| winrt::pick_device(d, &hint).is_ok()),
+        });
+        if t.dropped {
             log::line(format!("bluetooth audio dropped, state {:?}", link.state()));
             link.close();
-            now_available = false;
-            backoff = (backoff * 2).clamp(5, 120);
-            next_scan = Instant::now() + Duration::from_secs(backoff);
-        } else if Instant::now() >= next_scan {
-            now_available = match &bt_watch {
-                _ if link.is_open() => true, // a live link is available whatever the hint says now
-                Some(w) => w.has(&hint),
-                // No watcher (it failed to start): fall back to a full search once a minute.
-                None => winrt::A2dp::devices().is_ok_and(|d| winrt::pick_device(d, &hint).is_ok()),
-            };
-            next_scan = Instant::now() + Duration::from_secs(if bt_watch.is_some() { 2 } else { 60 });
         }
-        if now_available != available || error.is_some() {
-            available = now_available;
-            let _ = tx.send(Msg::A2dp { available, error });
+        if sm.available != before || error.is_some() || t.switched {
+            // `switched`: the engine is told the speaker link is gone without the "dropped" toast.
+            let _ = tx.send(Msg::A2dp { available: sm.available, error, quiet: t.switched });
         }
     }
 }
@@ -1385,7 +1378,8 @@ mod tests {
     }
 
     #[test]
-    fn an_open_link_is_kept_for_the_phone_it_goes_to_and_not_for_another() {
+    fn a_hint_matches_the_source_it_names_and_not_another() {
+        // Only the name match. Whether an open link is kept or closed is decided in a2dp_sm (tested there).
         let poco = hint_for("POCO X6 Pro 5G", "", "");
         assert!(poco.matches("POCO X6 Pro 5G"));
         assert!(!poco.matches("Ethan's Galaxy S24 Ultra"));

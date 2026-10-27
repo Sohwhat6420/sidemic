@@ -106,6 +106,9 @@ pub enum Event {
     Foreground { exe: String, is_game: bool },
     /// Whether the phone is reachable for mic and control (Wi-Fi/adb), and whether Bluetooth audio can open.
     PhoneLink { mic_link: bool, a2dp_available: bool },
+    /// The app closed the speaker link on purpose (the phone in use changed), so phone audio is on the phone
+    /// again. Same as the link dropping, minus the "dropped" toast.
+    SpeakerLinkClosed,
     /// Nothing happened; lets timers fire.
     Tick,
     SetMicMode { mode: MicMode },

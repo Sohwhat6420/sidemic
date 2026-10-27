@@ -186,6 +186,14 @@ impl Engine {
             Event::MicInUse { active, app_id } => self.on_mic(active, app_id, &mut out),
             Event::Foreground { exe, is_game } => self.foreground = Some((exe.to_ascii_lowercase(), is_game)),
             Event::PhoneLink { mic_link, a2dp_available } => self.on_link(mic_link, a2dp_available, &mut out),
+            Event::SpeakerLinkClosed => {
+                if self.phone_audio == Placement::Speaker {
+                    self.phone_audio = Placement::Phone;
+                    self.kept_sessions.clear();
+                    self.last_handback = None;
+                    self.release_duck_now(&mut out);
+                }
+            }
             Event::Tick => {}
             Event::SetMicMode { mode } => {
                 self.mic_mode = mode;
