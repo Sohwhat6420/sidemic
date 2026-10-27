@@ -431,7 +431,9 @@ fn main() {
             // The old install started at sign-in: register the new "Sidemic" Run value, since the stored
             // `autostart_set` setting carries over and would never write it.
             // A test install can leave the "Sidemic" value pointing at an exe that is gone: repoint it.
-            if legacy::migrate(&data) | legacy::run_value_is_stale() {
+            // (A value the user removed, or turned off in Task Manager, makes autostart_enabled false: left alone.)
+            let migrated = legacy::migrate(&data);
+            if migrated || (autostart_enabled(&handle) && legacy::run_value_is_stale()) {
                 set_autostart(&handle, true);
             }
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));

@@ -46,14 +46,7 @@ impl A2dp {
             return Ok("already open".into());
         }
         let devices = Self::devices().map_err(|e| e.to_string())?;
-        // With one Bluetooth audio source paired, that is the phone whatever it is called.
-        let devices_len = devices.len();
-        let only = devices.first().cloned();
-        let (id, name) = devices
-            .into_iter()
-            .find(|(_, n)| n.contains(name_hint) || (!n.is_empty() && name_hint.contains(n.as_str())))
-            .or_else(|| (devices_len == 1).then(|| only.clone()).flatten())
-            .ok_or_else(|| format!("no Bluetooth audio device named like \"{name_hint}\" (is the phone paired?)"))?;
+        let (id, name) = pick_device(devices, name_hint)?;
         let conn = AudioPlaybackConnection::TryCreateFromId(&id).map_err(|e| e.to_string())?;
         conn.StartAsync().and_then(|a| a.join()).map_err(|e| e.to_string())?;
         let result = conn.OpenAsync().and_then(|a| a.join()).map_err(|e| e.to_string())?;
@@ -224,5 +217,52 @@ pub fn foreground() -> (Option<String>, bool) {
         let exe = crate::wasapi::process_name(pid);
         let full = matches!(SHQueryUserNotificationState(), Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_BUSY);
         (exe, full)
+    }
+}
+
+/// Which paired Bluetooth audio source is the phone called `name_hint`. A name that matches nothing is NOT a
+/// reason to take the one device that is paired: on 27 Oct 2026 the POCO was unpaired and the only paired source was
+/// Ethan's Galaxy S24 Ultra, which the app then opened. The lone device is taken only when the phone's name is not
+/// known at all (the hint is the placeholder "phone").
+pub fn pick_device(devices: Vec<(windows::core::HSTRING, String)>, name_hint: &str) -> std::result::Result<(windows::core::HSTRING, String), String> {
+    let only = (devices.len() == 1 && name_hint == UNKNOWN_PHONE).then(|| devices[0].clone());
+    devices
+        .into_iter()
+        .find(|(_, n)| n.contains(name_hint) || (!n.is_empty() && name_hint.contains(n.as_str())))
+        .or(only)
+        .ok_or_else(|| format!("phone not paired: no Bluetooth audio device named like \"{name_hint}\" (pair it in Windows first)"))
+}
+
+/// What `core.rs` passes as the hint when the phone has told us no name at all.
+pub const UNKNOWN_PHONE: &str = "phone";
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn dev(id: &str, name: &str) -> (HSTRING, String) {
+        (HSTRING::from(id), name.to_string())
+    }
+
+    #[test]
+    fn the_phone_is_found_by_its_name() {
+        let both = vec![dev("a", "Ethan's Galaxy S24 Ultra"), dev("b", "POCO X6 Pro 5G")];
+        assert_eq!(pick_device(both, "POCO X6 Pro 5G").unwrap().1, "POCO X6 Pro 5G");
+    }
+
+    #[test]
+    fn an_unpaired_phone_does_not_take_over_the_one_device_that_is_paired() {
+        // 27 Oct 2026: the POCO was not paired, the S24 was the only source, and the app opened the S24.
+        let only_s24 = vec![dev("a", "Ethan's Galaxy S24 Ultra")];
+        let err = pick_device(only_s24, "POCO X6 Pro 5G").unwrap_err();
+        assert!(err.contains("phone not paired"), "{err}");
+    }
+
+    #[test]
+    fn a_phone_that_told_us_no_name_still_gets_the_lone_device() {
+        let only = vec![dev("a", "Some Phone")];
+        assert_eq!(pick_device(only, UNKNOWN_PHONE).unwrap().1, "Some Phone");
+        let two = vec![dev("a", "One"), dev("b", "Two")];
+        assert!(pick_device(two, UNKNOWN_PHONE).is_err());
     }
 }

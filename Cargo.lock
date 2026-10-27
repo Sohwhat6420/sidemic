@@ -4687,6 +4687,7 @@ dependencies = [
  "tokio",
  "tpl-policy",
  "windows",
+ "windows-registry",
 ]
 
 [[package]]

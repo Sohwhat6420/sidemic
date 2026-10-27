@@ -24,6 +24,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 tpl-policy = { path = "../../../crates/policy" }
 # WebRTC's AEC3 echo canceller, ported to Rust (MIT OR BSD-3-Clause): takes the speakers out of the phone mic.
 aec3 = { version = "=0.4.0", default-features = false }
+# Reads our own HKCU Run value as UTF-16 (the version auto-launch already pulls in).
+windows-registry = "0.6"
 
 [dependencies.windows]
 version = "0.62"

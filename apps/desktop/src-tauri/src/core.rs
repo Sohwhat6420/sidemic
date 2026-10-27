@@ -509,7 +509,7 @@ impl Core {
                     .into_iter()
                     .find(|s| !s.is_empty())
                     .cloned()
-                    .unwrap_or_else(|| "phone".into());
+                    .unwrap_or_else(|| winrt::UNKNOWN_PHONE.into());
                 let _ = self.a2dp_tx.send(A2dpCmd::Open(hint));
             }
             Action::CloseA2dp => {

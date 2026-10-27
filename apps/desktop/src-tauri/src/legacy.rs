@@ -87,48 +87,51 @@ pub fn run_value_exe(data: &str) -> Option<PathBuf> {
 /// True when a Run value's data starts some other program than `exe` (compared case-blind, ignoring a `\\?\`
 /// prefix and forward slashes).
 pub fn points_elsewhere(data: &str, exe: &Path) -> bool {
-    let norm = |p: &Path| {
-        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        real.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").to_ascii_lowercase()
-    };
     match run_value_exe(data) {
         Some(target) => norm(&target) != norm(exe),
         None => true,
     }
 }
 
-/// The data of our own "Sidemic" Run value, or None when there is none (autostart off, or never set).
+fn norm(p: &Path) -> String {
+    let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    real.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").to_ascii_lowercase()
+}
+
+/// When to rewrite the Run value `data` for the exe that is running now. Never on a mere difference: a release exe
+/// started from a test folder (an A/B build, `target\release`) must not take sign-in away from a working install.
+/// Repair only when the value's program no longer exists, or when this exe IS the real install (`install_exe`)
+/// and so may take the value back from some other exe.
+pub fn should_repair(data: &str, exe: &Path, install_exe: Option<&Path>) -> bool {
+    if !points_elsewhere(data, exe) {
+        return false;
+    }
+    let target_gone = run_value_exe(data).map_or(true, |t| !t.exists());
+    let this_is_the_install = install_exe.is_some_and(|i| norm(i) == norm(exe));
+    target_gone || this_is_the_install
+}
+
+/// The data of our own "Sidemic" Run value, or None when there is none (autostart off, or never set). Read through
+/// the registry API: `reg query` writes the OEM code page, which mangles a non-ASCII profile path.
 fn run_value_data() -> Option<String> {
-    let out = Command::new("reg")
-        .args(["query", RUN_KEY, "/v", RUN_VALUE])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    parse_reg_query(&String::from_utf8_lossy(&out.stdout))
+    windows_registry::CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Run").ok()?.get_string(RUN_VALUE).ok()
 }
 
-/// The data of the "Sidemic" value in `reg query` output (`    Sidemic    REG_SZ    <data>`).
-fn parse_reg_query(text: &str) -> Option<String> {
-    text.lines().find_map(|l| {
-        let (name, data) = l.split_once("REG_SZ").or_else(|| l.split_once("REG_EXPAND_SZ"))?;
-        (name.trim() == RUN_VALUE).then(|| data.trim().to_string())
-    })
-}
-
-/// Release starts only: true when our own "Sidemic" Run value exists but starts a different exe (a test install
-/// that was later deleted or moved leaves it pointing nowhere, so sign-in would start nothing). A missing value is
-/// left alone, since that means the user turned start at sign-in off. The caller rewrites it through the autostart
-/// plugin, which only ever touches the "Sidemic" value.
+/// Release starts only: true when our own "Sidemic" Run value exists and `should_repair` says to rewrite it for this
+/// exe. A missing value is left alone, since that means the user turned start at sign-in off; the caller also
+/// skips Task Manager's "Disabled" choice. The rewrite goes through the autostart plugin, which only ever touches
+/// the "Sidemic" value.
 pub fn run_value_is_stale() -> bool {
     if cfg!(debug_assertions) {
         return false;
     }
     let Ok(exe) = std::env::current_exe() else { return false };
+    let install = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map(|p| p.join("Sidemic").join("true-phone-link.exe"));
     match run_value_data() {
-        Some(data) if points_elsewhere(&data, &exe) => {
+        Some(data) if should_repair(&data, &exe, install.as_deref()) => {
             crate::log::line(format!("legacy: the \"{RUN_VALUE}\" Run value pointed at {data}, not at this exe; rewriting it"));
             true
         }
@@ -254,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_value_pointing_at_a_deleted_or_other_exe_is_stale() {
+    fn a_run_value_for_another_exe_counts_as_pointing_elsewhere() {
         let exe = Path::new(r"C:\Users\e\AppData\Local\Sidemic\true-phone-link.exe");
         assert!(points_elsewhere(r"C:\Users\e\AppData\Local\TRUE Phone Link\true-phone-link.exe --autostart", exe));
         assert!(points_elsewhere(r"C:\Other\sidemic-test.exe --autostart", exe));
@@ -262,14 +265,30 @@ mod tests {
     }
 
     #[test]
-    fn reg_query_output_is_read_and_only_our_own_value_counts() {
-        let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n    Sidemic    REG_SZ    C:\\x\\true-phone-link.exe --autostart\r\n\r\n";
-        assert_eq!(parse_reg_query(out).as_deref(), Some(r"C:\x\true-phone-link.exe --autostart"));
-        let other = "\r\nHKEY...\\Run\r\n    Sidemic watcher    REG_SZ    pythonw.exe tpl-watch.pyw\r\n";
-        // "Sidemic watcher" is a different value; the query asks for /v Sidemic so it cannot appear, but if it did
-        // the parser must not hand its data to the repair.
-        assert_eq!(parse_reg_query(other), None);
-        assert_eq!(parse_reg_query("ERROR: not found"), None);
+    fn an_unquoted_path_with_spaces_is_read_whole() {
+        let d = r"C:\Users\Jane Doe\AppData\Local\Sidemic\true-phone-link.exe --autostart";
+        assert_eq!(run_value_exe(d), Some(PathBuf::from(r"C:\Users\Jane Doe\AppData\Local\Sidemic\true-phone-link.exe")));
+    }
+
+    #[test]
+    fn a_value_whose_exe_is_gone_is_repaired_but_one_whose_exe_exists_is_not() {
+        let dir = scratch("repair");
+        let live_other = dir.join("sdm-ab.exe");
+        std::fs::write(&live_other, b"x").unwrap();
+        let running = dir.join("test-run.exe");
+        std::fs::write(&running, b"x").unwrap();
+        let gone = format!("{} --autostart", dir.join("deleted-install.exe").display());
+        let exists = format!("{} --autostart", live_other.display());
+        // a test exe running from some folder: fixes a dead value, never steals a working one
+        assert!(should_repair(&gone, &running, None));
+        assert!(!should_repair(&exists, &running, None));
+        // the value already names this exe: nothing to do
+        assert!(!should_repair(&format!("{} --autostart", running.display()), &running, None));
+        // the real install takes the value back even from another exe that still exists
+        assert!(should_repair(&exists, &running, Some(&running)));
+        // an empty or unreadable value is repaired
+        assert!(should_repair("", &running, None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
