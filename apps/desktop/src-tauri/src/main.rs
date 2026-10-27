@@ -428,7 +428,11 @@ fn main() {
                     ""
                 }
             ));
-            legacy::migrate(&data);
+            // The old install started at sign-in: register the new "Sidemic" Run value, since the stored
+            // `autostart_set` setting carries over and would never write it.
+            if legacy::migrate(&data) {
+                set_autostart(&handle, true);
+            }
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));
             hang::watch();
 
