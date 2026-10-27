@@ -336,9 +336,12 @@ impl Adb {
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
         // TPL_DENOISE=none|rnnoise|dfn is for A/B measurements (does the phone's DeepFilterNet stage defeat the echo canceller?).
         let denoise = std::env::var("TPL_DENOISE").ok().filter(|d| d.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "dfn".into());
+        // TPL_DSP=0 bypasses the phone's whole voice chain (noise suppression, speech leveller, limiter): the check
+        // for a time-varying gain in front of the laptop's echo canceller.
+        let dsp = if std::env::var("TPL_DSP").as_deref() == Ok("0") { "0" } else { "1" };
         let script = format!(
             "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve \
-             source=voice-recognition engine=native denoise={denoise} atten=35 lib={REMOTE_DIR}/{VOICE_LIB}"
+             source=voice-recognition engine=native denoise={denoise} atten=35 dsp={dsp} lib={REMOTE_DIR}/{VOICE_LIB}"
         );
         let mut child = self
             .cmd()
