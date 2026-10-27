@@ -1,4 +1,4 @@
-//! TRUE Phone Link for Windows: a tray app. Left-click the tray icon for the flyout; the full window opens from
+//! Sidemic for Windows: a tray app. Left-click the tray icon for the flyout; the full window opens from
 //! there. Everything that decides or touches audio lives in `core`; this file is the windows and the tray.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -7,6 +7,7 @@ mod adb;
 mod core;
 mod echo;
 mod hang;
+mod legacy;
 mod log;
 mod mic;
 mod phone;
@@ -130,7 +131,7 @@ fn show_main(app: &AppHandle, page: &str) {
     }
     let url = WebviewUrl::App(format!("window.html?page={page}").into());
     let built = WebviewWindowBuilder::new(app, "main", url)
-        .title("TRUE Phone Link")
+        .title("Sidemic")
         .inner_size(1000.0, 680.0)
         .min_inner_size(720.0, 480.0)
         .transparent(true)
@@ -146,7 +147,7 @@ fn show_main(app: &AppHandle, page: &str) {
 
 fn build_flyout(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let w = WebviewWindowBuilder::new(app, "flyout", WebviewUrl::App("flyout.html".into()))
-        .title("TRUE Phone Link")
+        .title("Sidemic")
         .inner_size(FLYOUT_WIDTH, 420.0)
         .decorations(false)
         .transparent(true)
@@ -303,7 +304,7 @@ pub fn set_pause_label(app: &AppHandle, paused: bool) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(p) = app2.try_state::<PauseItem>() {
-            let _ = p.0.set_text(if paused { "Resume TRUE Phone Link" } else { "Pause TRUE Phone Link" });
+            let _ = p.0.set_text(if paused { "Resume Sidemic" } else { "Pause Sidemic" });
         }
     });
 }
@@ -417,7 +418,7 @@ fn main() {
             let _ = std::fs::remove_file(data.join(QUIT_FLAG));
             let at_sign_in = std::env::args().any(|a| a == AUTOSTART_ARG);
             log::line(format!(
-                "TRUE Phone Link {} started{}",
+                "Sidemic {} started{}",
                 env!("CARGO_PKG_VERSION"),
                 if restarted {
                     " again after the window stopped answering"
@@ -427,16 +428,17 @@ fn main() {
                     ""
                 }
             ));
+            legacy::migrate(&data);
             app.manage(core::start(handle.clone(), data, phone_dir(&handle)));
             hang::watch();
 
             // The flyout loads on the first tray click, not at sign-in, and unloads when left closed.
             unload_idle_flyout(handle.clone());
 
-            let open = MenuItem::with_id(app, "open", "Open TRUE Phone Link", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Sidemic", true, None::<&str>)?;
             let mark = MenuItem::with_id(app, "mark", "Mark a problem now", true, None::<&str>)?;
             let logs = MenuItem::with_id(app, "logs", "Open the log folder", true, None::<&str>)?;
-            let pause = MenuItem::with_id(app, "pause", "Pause TRUE Phone Link", true, None::<&str>)?;
+            let pause = MenuItem::with_id(app, "pause", "Pause Sidemic", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let phones = Submenu::with_id(app, "phones", "Phones", true)?;
             let menu = Menu::with_items(app, &[&open, &phones, &pause, &mark, &logs, &quit])?;
@@ -448,7 +450,7 @@ fn main() {
             set_pause_label(app.handle(), paused);
             TrayIconBuilder::with_id("tray")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
-                .tooltip("TRUE Phone Link")
+                .tooltip("Sidemic")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
@@ -503,7 +505,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("TRUE Phone Link failed to start");
+        .expect("Sidemic failed to start");
 
     app.run(|_, e| match e {
         // Closing the window keeps the tray app running; only Quit exits.

@@ -334,9 +334,11 @@ impl Adb {
     /// The returned child is the `adb shell` that hosts it; its stdout carries the server's log.
     pub fn start_server(&self, serial: &str) -> Result<Child, String> {
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
+        // TPL_DENOISE=none|rnnoise|dfn is for A/B measurements (does the phone's DeepFilterNet stage defeat the echo canceller?).
+        let denoise = std::env::var("TPL_DENOISE").ok().filter(|d| d.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "dfn".into());
         let script = format!(
             "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve \
-             source=voice-recognition engine=native denoise=dfn atten=35 lib={REMOTE_DIR}/{VOICE_LIB}"
+             source=voice-recognition engine=native denoise={denoise} atten=35 lib={REMOTE_DIR}/{VOICE_LIB}"
         );
         let mut child = self
             .cmd()

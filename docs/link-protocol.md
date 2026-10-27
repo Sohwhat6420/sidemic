@@ -289,4 +289,4 @@ After any close, the PC re-runs the address order and, once linked, **re-reads t
 
 ## 12. Versioning
 - `PROTO` appears in the TXT record, the preamble, the SPAKE2 identities and the Noise prologue. A change to anything on this page that an older peer would misread **bumps `PROTO`**. Adding a control message does not (§6.1).
-- A phone app that supports several versions advertises the highest in TXT and answers status 1 to any version it does not support. A PC that sees a higher `proto` than it supports says "Update TRUE Phone Link on this PC".
+- A phone app that supports several versions advertises the highest in TXT and answers status 1 to any version it does not support. A PC that sees a higher `proto` than it supports says "Update Sidemic on this PC".

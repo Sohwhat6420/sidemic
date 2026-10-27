@@ -736,11 +736,11 @@ impl Core {
         let st = self.engine.state();
         let connected = self.ctl.connected();
         let (hint, hint_long) = match &self.link {
-            Link::NoAdb => ("adb isn't installed".to_owned(), "TRUE Phone Link uses adb to reach the phone. Install scrcpy (it includes adb) with: winget install Genymobile.scrcpy".to_owned()),
+            Link::NoAdb => ("adb isn't installed".to_owned(), "Sidemic uses adb to reach the phone. Install scrcpy (it includes adb) with: winget install Genymobile.scrcpy".to_owned()),
             Link::Missing => ("Tap Wireless debugging on your phone".to_owned(), "The phone isn't reachable over Wi-Fi. After a restart or a Wi-Fi change, the phone turns Wireless debugging off: swipe down and tap its tile in Quick settings. Both devices must be on the same Wi-Fi.".to_owned()),
             Link::Unauthorised => ("Allow this laptop on your phone".to_owned(), "The phone is asking whether to allow wireless debugging from this laptop on this network. Tap Allow, and tick Always allow on this network.".to_owned()),
-            Link::Failed(e) => ("Couldn't start on the phone".to_owned(), format!("Starting TRUE Phone Link on the phone failed: {e}. It retries by itself.")),
-            Link::Starting | Link::Ready if !connected => ("Connecting…".to_owned(), "Starting TRUE Phone Link on the phone. This takes a few seconds.".to_owned()),
+            Link::Failed(e) => ("Couldn't start on the phone".to_owned(), format!("Starting Sidemic on the phone failed: {e}. It retries by itself.")),
+            Link::Starting | Link::Ready if !connected => ("Connecting…".to_owned(), "Starting Sidemic on the phone. This takes a few seconds.".to_owned()),
             _ => (String::new(), String::new()),
         };
 
@@ -901,7 +901,7 @@ fn refusal_hint(manufacturer: &str, what: &str) -> String {
 }
 
 fn tooltip(connected: bool, hint: &str, live: &str, playing: &Option<String>, audio: Placement) -> String {
-    let mut t = String::from("TRUE Phone Link");
+    let mut t = String::from("Sidemic");
     if !connected {
         t += &format!("\n{hint}");
         return t;
@@ -1021,7 +1021,7 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                 if let Some(s) = stand_in.take() {
                     log::line(format!("auto-switch: {chosen} is back, returning to it from {s}"));
                     let _ = tx.send(Msg::Notice {
-                        text: "Your phone is back, so TRUE Phone Link has switched to it.".into(),
+                        text: "Your phone is back, so Sidemic has switched to it.".into(),
                         buttons: vec![("OK".into(), "dismiss".into(), String::new())],
                     });
                     drop_link(&mut server);
@@ -1036,7 +1036,7 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                             Some(n) => {
                                 log::line(format!("auto-switch: {chosen} isn't reachable, using {n}"));
                                 let _ = tx.send(Msg::Notice {
-                                    text: "Your phone isn't reachable, so TRUE Phone Link is using the other ready phone. It goes back when yours returns.".into(),
+                                    text: "Your phone isn't reachable, so Sidemic is using the other ready phone. It goes back when yours returns.".into(),
                                     buttons: vec![("OK".into(), "dismiss".into(), String::new())],
                                 });
                             }

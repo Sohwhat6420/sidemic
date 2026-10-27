@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/icon.png" width="88" alt="TRUE Phone Link icon">
+<img src="docs/assets/icon.png" width="88" alt="Sidemic icon">
 
-# TRUE Phone Link
+# Sidemic
 
 **Your Android phone becomes your PC's microphone, and your phone's music plays on your PC speakers.**<br>
 Wireless, automatic, and nothing to install on the phone.
@@ -14,7 +14,7 @@ Wireless, automatic, and nothing to install on the phone.
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-live%20testing-orange)](#roadmap)
 
-<img src="docs/assets/hero.png" alt="The TRUE Phone Link window and tray flyout on Windows 11" width="100%">
+<img src="docs/assets/hero.png" alt="The Sidemic window and tray flyout on Windows 11" width="100%">
 
 [What it does](#what-it-does) ·
 [How it works](#how-it-works) ·
@@ -33,7 +33,7 @@ Laptop microphones are bad, and the phone in your pocket has four good ones and 
 The apps that let you use it as a PC mic tend to show adverts, stop after an hour, or need you to open something
 on the phone every time.
 
-TRUE Phone Link sits in the Windows tray and just does it. When Discord or a game opens the mic, your phone's mic
+Sidemic sits in the Windows tray and just does it. When Discord or a game opens the mic, your phone's mic
 goes live; when it closes, it switches off. If you start music on your phone while the laptop is quiet, it moves to
 your PC speakers, and it moves back when you play something on the laptop. You don't touch either device.
 
@@ -114,7 +114,7 @@ flowchart LR
 
     subgraph pc["💻 Windows PC"]
         direction TB
-        app["TRUE Phone Link<br/><sub>Rust + Tauri tray app</sub>"]
+        app["Sidemic<br/><sub>Rust + Tauri tray app</sub>"]
         policy["Smart auto<br/><sub>pure Rust policy crate</sub>"]
         cable["VB-CABLE<br/><sub>virtual mic</sub>"]
         apps["Discord, games, Zoom"]
@@ -131,7 +131,7 @@ flowchart LR
 - **No phone app.** The laptop pushes a small server to the phone over wireless adb and runs it as the shell
   user with `app_process`, the same trick [scrcpy](https://github.com/Genymobile/scrcpy) uses. It stays warm, so
   the mic starts without clipping your first word.
-- **Your apps never get reconfigured.** They use *CABLE Output* as their mic once, and TRUE Phone Link decides
+- **Your apps never get reconfigured.** They use *CABLE Output* as their mic once, and Sidemic decides
   what feeds it: the phone, or the laptop's own mic as a fallback.
 - **Phone media** uses Windows' own Bluetooth audio sink (`AudioPlaybackConnection`), which the app opens and
   closes itself.
@@ -140,7 +140,7 @@ flowchart LR
 ## Getting started
 
 > [!NOTE]
-> TRUE Phone Link is in a one-week live test on the author's own laptop and phone. There's no installer release
+> Sidemic is in a one-week live test on the author's own laptop and phone. There's no installer release
 > yet; until v1 you [build it from source](#build-from-source).
 
 ### Requirements
@@ -186,7 +186,7 @@ Notes from the POCO test (17 Oct 2026):
 - **YouTube Music and Spotify** weren't tested (they need a signed-in account).
 
 ### Then
-- Install and start TRUE Phone Link. It sits in the tray and starts with Windows.
+- Install and start Sidemic. It sits in the tray and starts with Windows.
 - In Discord or your game, set the input device to **CABLE Output** once.
 - That's it. After a phone restart, tap the **Wireless debugging** tile once and it reconnects.
 
@@ -230,7 +230,7 @@ and through the phone's voice chain.
 
 **Voice quality** (DNSMOS, 1–5, higher is better)
 
-| | Raw phone mic | TRUE Phone Link |
+| | Raw phone mic | Sidemic |
 | --- | :---: | :---: |
 | Speech | 1.24 | **3.14** |
 | Background | 1.17 | **3.90** |

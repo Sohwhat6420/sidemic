@@ -1,6 +1,6 @@
-# Efficiency: how TRUE Phone Link went from ~800 MB and a busy core to ~8 MB idle
+# Efficiency: how Sidemic went from ~800 MB and a busy core to ~8 MB idle
 
-TRUE Phone Link sits in the tray all day, so it has to cost close to nothing while nothing is happening. A day
+Sidemic sits in the tray all day, so it has to cost close to nothing while nothing is happening. A day
 of real use showed it didn't, so I measured where the cost came from and fixed each cause. All figures are from
 the same laptop (Windows 11, 20 logical cores), 16 Oct 2026.
 

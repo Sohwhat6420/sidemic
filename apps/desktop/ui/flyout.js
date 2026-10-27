@@ -82,7 +82,7 @@ start((s) => {
   $("status").innerHTML = lines.join("");
 
   $("pause").innerHTML = s.paused ? `${icon("play_20_regular", "i16")}Resume` : `${icon("pause_20_regular", "i16")}Pause`;
-  $("pause").title = s.paused ? "Turn TRUE Phone Link back on, as it was" : "Use the laptop mic, keep phone audio on the phone, and stop moving things automatically";
+  $("pause").title = s.paused ? "Turn Sidemic back on, as it was" : "Use the laptop mic, keep phone audio on the phone, and stop moving things automatically";
 
   // A question or notice from Smart auto.
   const b = s.banner;
