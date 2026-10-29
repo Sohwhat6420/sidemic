@@ -397,6 +397,10 @@ impl Supervised<Canceller> {
 }
 
 #[cfg(test)]
+#[path = "echo_sim.rs"]
+mod echo_sim;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

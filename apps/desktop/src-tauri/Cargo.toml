@@ -58,3 +58,7 @@ features = [
     "UI",
     "UI_ViewManagement",
 ]
+
+[dev-dependencies]
+# Offline echo experiments only (src/echo_sim.rs): the phone chain that sits in front of AEC3 on the real path.
+tpl-voice = { path = "../../../crates/voice", default-features = false }

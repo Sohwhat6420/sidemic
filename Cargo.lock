@@ -4686,6 +4686,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tpl-policy",
+ "tpl-voice",
  "windows",
  "windows-registry",
 ]
