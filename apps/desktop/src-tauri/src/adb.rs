@@ -339,9 +339,12 @@ impl Adb {
         // TPL_DSP=0 bypasses the phone's whole voice chain (noise suppression, speech leveller, limiter): the check
         // for a time-varying gain in front of the laptop's echo canceller.
         let dsp = if std::env::var("TPL_DSP").as_deref() == Ok("0") { "0" } else { "1" };
+        // TPL_MAXGAIN=<dB> caps the phone's speech leveller (default 24): the A/B for "does the leveller in front of
+        // the echo canceller spend its gain" (investigations/2026-10-29-echo-sim.md). Test only.
+        let maxgain = maxgain_arg(std::env::var("TPL_MAXGAIN").ok().as_deref());
         let script = format!(
             "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve \
-             source=voice-recognition engine=native denoise={denoise} atten=35 dsp={dsp} lib={REMOTE_DIR}/{VOICE_LIB}"
+             source=voice-recognition engine=native denoise={denoise} atten=35 dsp={dsp}{maxgain} lib={REMOTE_DIR}/{VOICE_LIB}"
         );
         let mut child = self
             .cmd()
@@ -382,9 +385,29 @@ fn pipe_to_log(r: impl Read + Send + 'static) {
     });
 }
 
+/// The phone-server argument for `TPL_MAXGAIN` (" maxgain=12"), or nothing. Only a plain number from 0 to 24 dB is
+/// passed on; anything else is ignored rather than put on a shell command line.
+fn maxgain_arg(v: Option<&str>) -> String {
+    match v.and_then(|v| v.trim().parse::<f32>().ok()) {
+        Some(g) if g.is_finite() && (0.0..=24.0).contains(&g) => format!(" maxgain={g}"),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_leveller_cap_is_passed_on_only_as_a_plain_number_of_0_to_24_db() {
+        assert_eq!(maxgain_arg(Some("12")), " maxgain=12");
+        assert_eq!(maxgain_arg(Some(" 0 ")), " maxgain=0");
+        assert_eq!(maxgain_arg(Some("7.5")), " maxgain=7.5");
+        assert_eq!(maxgain_arg(None), "");
+        for bad in ["", "25", "-1", "NaN", "inf", "12; reboot", "$(id)", "12 lib=/x"] {
+            assert_eq!(maxgain_arg(Some(bad)), "", "{bad:?}");
+        }
+    }
 
     // Measured 17 Oct 2026: a Galaxy S24 Ultra (One UI 8) and a POCO X6 Pro (HyperOS 2) on one laptop. The POCO
     // is listed twice: it re-advertised itself on a new port after Wireless debugging restarted.

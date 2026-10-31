@@ -394,22 +394,24 @@ impl Core {
                 }
             }
             Msg::A2dp { available, error, quiet } => {
-                if quiet {
-                    // The app closed the link for a phone switch: not a drop, so no "dropped" toast.
-                    self.feed(Event::SpeakerLinkClosed);
-                }
+                let changed = available != self.a2dp_available;
                 if let Some(e) = &error {
                     log::line(format!("bluetooth audio error: {e}"));
                 }
-                if available != self.a2dp_available {
+                if changed {
                     log::line(format!("bluetooth audio available: {available}"));
                 }
                 if error.is_some() {
                     self.a2dp_error = error;
                 }
-                if available != self.a2dp_available {
-                    self.a2dp_available = available;
-                    self.link_changed();
+                for step in a2dp_report(quiet, changed) {
+                    match step {
+                        A2dpReport::SpeakerClosed => self.feed(Event::SpeakerLinkClosed),
+                        A2dpReport::LinkChanged => {
+                            self.a2dp_available = available;
+                            self.link_changed();
+                        }
+                    }
                 }
             }
             Msg::Laptop(ev) => self.feed(ev),
@@ -568,6 +570,9 @@ impl Core {
             self.settings.paused = None;
             self.save_settings();
         }
+        if wants_speaker(action, arg, st.phone_audio) {
+            let _ = self.a2dp_tx.send(A2dpCmd::Retry); // don't make him wait out an old backoff
+        }
         match action {
             "use_phone" => {
                 if let Some(id) = arg {
@@ -649,12 +654,8 @@ impl Core {
                 AudioMode::Phone => MicMode::Phone,
                 AudioMode::Laptop => MicMode::Laptop,
             })),
-            "audio_mode" => {
-                let _ = self.a2dp_tx.send(A2dpCmd::Retry); // don't wait out an old backoff
-                self.set_audio_mode(parse_mode(arg).unwrap_or(AudioMode::Auto));
-            }
+            "audio_mode" => self.set_audio_mode(parse_mode(arg).unwrap_or(AudioMode::Auto)),
             "toggle_audio" => {
-                let _ = self.a2dp_tx.send(A2dpCmd::Retry);
                 if st.phone_audio == Placement::Speaker {
                     if st.audio_mode == AudioMode::Laptop {
                         self.set_audio_mode(AudioMode::Auto);
@@ -880,6 +881,38 @@ impl Core {
             let _ = self.app.emit("state", state);
         }
     }
+}
+
+/// Whether a click asks for the speaker, so a stale Bluetooth backoff should be cut short: the Laptop and Auto
+/// modes do (Auto may take it), Phone does not, and the toggle does when it is not on the speaker (its other branch
+/// hands the audio back).
+fn wants_speaker(action: &str, arg: Option<&str>, phone_audio: Placement) -> bool {
+    match action {
+        "audio_mode" => parse_mode(arg) != Some(AudioMode::Phone),
+        "toggle_audio" => phone_audio != Placement::Speaker,
+        _ => false,
+    }
+}
+
+/// What the brain does with a report from the Bluetooth thread, in order. `quiet`: the thread closed the link on
+/// purpose for a phone switch, so phone audio goes back to the phone without the "dropped" toast, and that comes
+/// BEFORE the availability change (which would otherwise raise the toast). `changed`: availability differs from what
+/// the engine last heard.
+#[derive(Debug, PartialEq, Eq)]
+enum A2dpReport {
+    SpeakerClosed,
+    LinkChanged,
+}
+
+fn a2dp_report(quiet: bool, changed: bool) -> Vec<A2dpReport> {
+    let mut steps = Vec::new();
+    if quiet {
+        steps.push(A2dpReport::SpeakerClosed);
+    }
+    if changed {
+        steps.push(A2dpReport::LinkChanged);
+    }
+    steps
 }
 
 fn parse_mode(arg: Option<&str>) -> Option<AudioMode> {
@@ -1223,9 +1256,17 @@ fn a2dp_thread(rx: Receiver<A2dpCmd>, tx: Sender<Msg>) {
                 hint = h;
             }
             Ok(A2dpCmd::Open) => {
+                let was_open = link.is_open();
                 let r = link.open(&hint);
                 log::line(format!("bluetooth audio open ({:?}): {r:?}", hint.names));
-                sm.on_open(Instant::now(), r.is_ok());
+                sm.on_open(
+                    Instant::now(),
+                    match (&r, was_open) {
+                        (Err(_), _) => crate::a2dp_sm::Open::Failed,
+                        (Ok(_), true) => crate::a2dp_sm::Open::AlreadyOpen,
+                        (Ok(_), false) => crate::a2dp_sm::Open::Opened,
+                    },
+                );
                 error = r.err();
             }
             Ok(A2dpCmd::Close) => {
@@ -1383,6 +1424,66 @@ mod tests {
         let poco = hint_for("POCO X6 Pro 5G", "", "");
         assert!(poco.matches("POCO X6 Pro 5G"));
         assert!(!poco.matches("Ethan's Galaxy S24 Ultra"));
+    }
+
+    use super::{a2dp_report, parse_mode, wants_speaker, A2dpReport};
+    use tpl_policy::{Action, AudioMode, Config, Engine, Event, Memory, Placement, TOAST_BLUETOOTH_LOST};
+
+    #[test]
+    fn only_a_click_that_wants_the_speaker_cuts_the_backoff_short() {
+        for (action, arg, on, want) in [
+            ("audio_mode", Some("laptop"), Placement::Phone, true),
+            ("audio_mode", Some("auto"), Placement::Phone, true),
+            ("audio_mode", None, Placement::Phone, true), // unparsed = Auto
+            ("audio_mode", Some("phone"), Placement::Speaker, false),
+            ("toggle_audio", None, Placement::Phone, true), // would open the speaker
+            ("toggle_audio", None, Placement::Speaker, false), // hands back
+            ("volume", Some("0.5"), Placement::Phone, false),
+            ("hand_back", None, Placement::Speaker, false),
+        ] {
+            assert_eq!(wants_speaker(action, arg, on), want, "{action} {arg:?} {on:?}");
+        }
+        assert_eq!(parse_mode(Some("phone")), Some(AudioMode::Phone));
+    }
+
+    /// Runs the brain's reaction to a Bluetooth report through the real engine, with phone audio on the speaker.
+    fn toasts_after(quiet: bool) -> (Vec<String>, Placement) {
+        let mut e = Engine::new(Config::default(), Memory::default());
+        e.handle(0, Event::PhoneLink { mic_link: true, a2dp_available: true });
+        let opened = e.handle(1_000, Event::PhoneMedia { playing: true, package: "com.zhiliaoapp.musically".into() });
+        assert!(opened.contains(&Action::OpenA2dp), "setup: phone media should take the speaker: {opened:?}");
+        let mut toasts = Vec::new();
+        for step in a2dp_report(quiet, true) {
+            let ev = match step {
+                A2dpReport::SpeakerClosed => Event::SpeakerLinkClosed,
+                A2dpReport::LinkChanged => Event::PhoneLink { mic_link: true, a2dp_available: false },
+            };
+            for a in e.handle(3_000, ev) {
+                if let Action::Toast { text, .. } = a {
+                    toasts.push(text);
+                }
+            }
+        }
+        (toasts, e.state().phone_audio)
+    }
+
+    #[test]
+    fn a_phone_switch_goes_back_to_the_phone_quietly_and_a_real_drop_still_says_so() {
+        let (toasts, audio) = toasts_after(true);
+        assert!(toasts.is_empty(), "a deliberate switch must not toast: {toasts:?}");
+        assert_eq!(audio, Placement::Phone);
+        // the same report from a real drop (not quiet) is the old behaviour: back on the phone, with the toast
+        let (toasts, audio) = toasts_after(false);
+        assert_eq!(toasts, vec![TOAST_BLUETOOTH_LOST.to_string()]);
+        assert_eq!(audio, Placement::Phone);
+    }
+
+    #[test]
+    fn the_report_order_puts_the_quiet_close_before_the_availability_change() {
+        assert_eq!(a2dp_report(true, true), vec![A2dpReport::SpeakerClosed, A2dpReport::LinkChanged]);
+        assert_eq!(a2dp_report(true, false), vec![A2dpReport::SpeakerClosed]);
+        assert_eq!(a2dp_report(false, true), vec![A2dpReport::LinkChanged]);
+        assert!(a2dp_report(false, false).is_empty());
     }
 
     #[test]
