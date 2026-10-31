@@ -59,6 +59,21 @@ fn heard(play: &[f32], lag_ms: usize, level_db: f32) -> Vec<f32> {
     raw.iter().map(|s| s * k).collect()
 }
 
+/// A less kind room: the speaker clips softly (tanh, `drive` > 0) and the mic adds white noise at `noise_db` dBFS.
+/// Applied to what `heard` returned, with a fixed seed so runs repeat.
+fn harsh(x: &[f32], drive: f32, noise_db: f32) -> Vec<f32> {
+    let (mut seed, amp) = (0x2545F491u32, 10f32.powf(noise_db / 20.0) * 3f32.sqrt());
+    let peak = x.iter().fold(1e-9f32, |m, v| m.max(v.abs()));
+    x.iter()
+        .map(|v| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let n = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+            let y = if drive > 0.0 { (v / peak * drive).tanh() / drive.tanh() * peak } else { *v };
+            y + n * amp
+        })
+        .collect()
+}
+
 /// Which parts of the phone chain run (high-pass and presence always do; noise suppression is not built in here).
 #[derive(Clone, Copy)]
 struct Stages {
@@ -191,6 +206,25 @@ fn echo_sim_where_the_leveller_sits() {
         eprintln!(
             "  {:4.0} | {:12.1} | {:7.1} | {:12.1} | {:12.1} | {:10.1} | {:10.1} | {:11.1} | {:10.1}",
             level, a.0, a_raw, b.0, c.0, g.0, h.0, d.0, f.0
+        );
+    }
+    // Harder rooms: can the model be made to leave the live path's ~-43 dB at all? (echo at the mic -46 dBFS)
+    eprintln!("harsher rooms, echo -46 dBFS at the mic: drive = tanh drive at the mic, noise in dBFS");
+    eprintln!("  drive noise | A chain>AEC3 | B AEC3>chain | C neither | D lev 12 dB | F lev 0 dB");
+    for (drive, noise) in [(0.0f32, -80.0f32), (0.0, -70.0), (0.0, -60.0), (2.0, -80.0), (4.0, -70.0)] {
+        let mic = harsh(&heard(&play, lag_ms, -46.0), drive, noise);
+        let (mic, play) = (&mic, &play);
+        let st = |leveller, limiter, max_gain_db| Stages { leveller, limiter, max_gain_db };
+        let r = std::thread::scope(|s| {
+            let v = |stages: Stages| s.spawn(move || tail_db(&aec(&chain(stages, mic), play).0));
+            let b = s.spawn(move || tail_db(&chain(SHIPPED, &aec(mic, play).0)));
+            let h = [v(SHIPPED), v(st(false, false, 24.0)), v(st(true, true, 12.0)), v(st(true, true, 0.0))];
+            let [a, c, d, f] = h.map(|x| x.join().unwrap());
+            (a, b.join().unwrap(), c, d, f)
+        });
+        eprintln!(
+            "  {:5.1} {:5.0} | {:12.1} | {:12.1} | {:9.1} | {:11.1} | {:10.1}",
+            drive, noise, r.0, r.1, r.2, r.3, r.4
         );
     }
     eprintln!("frames AEC3 could not produce (passed through unchanged), all variants: {passed_total}");
