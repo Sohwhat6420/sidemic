@@ -885,7 +885,8 @@ impl Core {
 
 /// Whether a click asks for the speaker, so a stale Bluetooth backoff should be cut short: the Laptop and Auto
 /// modes do (Auto may take it), Phone does not, and the toggle does when it is not on the speaker (its other branch
-/// hands the audio back).
+/// hands the audio back). Only these two clicks: resuming from pause, the game prompt's answer and Keep can also
+/// want the speaker and still wait out a stale backoff, as they always did.
 fn wants_speaker(action: &str, arg: Option<&str>, phone_audio: Placement) -> bool {
     match action {
         "audio_mode" => parse_mode(arg) != Some(AudioMode::Phone),

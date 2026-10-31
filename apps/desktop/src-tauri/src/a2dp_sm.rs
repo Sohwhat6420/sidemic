@@ -362,13 +362,26 @@ mod tests {
     }
 
     #[test]
-    fn a_hint_that_does_not_match_the_open_source_does_not_claim_it() {
+    fn an_empty_hint_does_not_claim_an_unowned_link() {
         let t0 = Instant::now();
         let mut m = Machine::new(t0);
         m.on_hint(t0, None, false, true, false, false);
         m.on_open(t0, Open::Opened);
         assert!(!m.on_hint(t0 + s(1), id("s24"), true, true, true, false)); // empty names: no claim, no close
         assert_eq!(m.owner(), None);
+    }
+
+    #[test]
+    fn a_duplicate_open_does_not_hand_an_unowned_link_to_the_phone_in_the_roster() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(t0);
+        m.on_hint(t0, None, false, true, false, false);
+        m.on_open(t0, Open::Opened); // opened before the roster named the phone
+        assert!(!m.on_hint(t0 + s(1), id("s24"), true, true, true, false)); // no names yet: no claim, no close
+        m.on_open(t0 + s(2), Open::AlreadyOpen);
+        assert_eq!(m.owner(), None);
+        // once s24's hint names an open source that does not match, the old link closes
+        assert!(m.on_hint(t0 + s(5), id("s24"), false, true, true, false));
     }
 
     #[test]
@@ -381,10 +394,9 @@ mod tests {
         m.tick(now, false, false, SCAN, || true);
         m.on_open(now, Open::Opened);
         assert_eq!(m.owner(), Some("poco"));
-        // the phone in use changes in the roster without the link being touched yet, then a duplicate Open arrives
-        m.on_hint(now + s(1), id("s24"), true, true, false, false);
+        // a duplicate Open arrives while the link is open: it must not touch the owner
         m.on_open(now + s(50), Open::AlreadyOpen);
-        assert_eq!(m.owner(), Some("poco"), "the duplicate must not hand the link to the new phone");
+        assert_eq!(m.owner(), Some("poco"), "the duplicate must not change whose link it is");
         // and it did not restart the one-minute clock: 61 s after the real open the backoff is forgiven
         now += s(61);
         m.tick(now, true, true, SCAN, || true);
