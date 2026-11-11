@@ -42,7 +42,7 @@ const QUIT_FLAG: &str = "quit.flag";
 /// hidden pages; software drawing renders them the same (checked 16 Oct).
 const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu";
 
-/// The flyout is unloaded once it has been closed this long (Ethan's choice, 16 Oct): with no page open,
+/// The flyout is unloaded once it has been closed this long (the owner's choice, 16 Oct): with no page open,
 /// WebView2's six processes exit and the app idles at about 12 MB instead of about 106 MB. Opening it again
 /// after that takes about half a second.
 const FLYOUT_UNLOAD_AFTER: Duration = Duration::from_secs(120);

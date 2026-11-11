@@ -292,28 +292,28 @@ mod pick_tests {
 
     #[test]
     fn the_phone_is_found_by_its_name() {
-        let both = vec![dev("a", "Ethan's Galaxy S24 Ultra"), dev("b", "POCO X6 Pro 5G")];
+        let both = vec![dev("a", "Alex's Galaxy S24 Ultra"), dev("b", "POCO X6 Pro 5G")];
         assert_eq!(pick_device(both, &hint(&["POCO X6 Pro 5G"])).unwrap().1, "POCO X6 Pro 5G");
     }
 
     #[test]
     fn an_unpaired_phone_does_not_take_over_the_one_device_that_is_paired() {
         // 27 Oct 2026: the POCO was not paired, the S24 was the only source, and the app opened the S24.
-        let only_s24 = vec![dev("a", "Ethan's Galaxy S24 Ultra")];
+        let only_s24 = vec![dev("a", "Alex's Galaxy S24 Ultra")];
         let err = pick_device(only_s24, &hint(&["POCO X6 Pro 5G", "23122PCD1G"])).unwrap_err();
         assert!(err.contains("phone not paired"), "{err}");
     }
 
     #[test]
     fn nothing_is_opened_before_a_phone_has_introduced_itself() {
-        let only_s24 = vec![dev("a", "Ethan's Galaxy S24 Ultra")];
+        let only_s24 = vec![dev("a", "Alex's Galaxy S24 Ultra")];
         let err = pick_device(only_s24, &Hint::default()).unwrap_err();
         assert!(err.contains("phone not paired") && err.contains("introduced"), "{err}");
     }
 
     #[test]
     fn any_known_name_may_match() {
-        let h = hint(&["Ethan's POCO", "POCO X6"]);
+        let h = hint(&["Alex's POCO", "POCO X6"]);
         assert_eq!(h.pick(&["Galaxy S24", "POCO X6 Pro 5G"]), Some(1));
         assert_eq!(h.pick(&[]), None);
     }

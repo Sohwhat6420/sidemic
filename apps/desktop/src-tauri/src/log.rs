@@ -1,6 +1,6 @@
 //! The run log: one plain-text file per day in `%APPDATA%\com.truephonelink.desktop\logs\`, kept for 14 days.
 //! It records what the app saw (mic users, laptop and phone media, links), what it did and why, and any marks
-//! Ethan made from the tray ("Mark a problem now"), so a week of real use can be read back afterwards.
+//! the user made from the tray ("Mark a problem now"), so a week of real use can be read back afterwards.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

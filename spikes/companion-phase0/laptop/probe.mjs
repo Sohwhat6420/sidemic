@@ -1,5 +1,5 @@
 // Laptop side of the Phase 0 spike. Finds the spike app over mDNS, holds the link, pings it every second and
-// logs every gap. Node, no dependencies: node.exe already has a Private-profile inbound rule on Ethan's laptop.
+// logs every gap. Node, no dependencies: node.exe already has a Private-profile inbound rule on the test laptop.
 //
 //   node probe.mjs browse [secs]                    mDNS only: when, from where, and what the phone advertises
 //   node probe.mjs link [--addr ip] [--mic] [--stream] [--hours h] [--log file]

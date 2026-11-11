@@ -59,7 +59,7 @@ impl Default for Params {
 }
 
 impl Params {
-    /// The "perfect mic" preset, chosen by the 15 Oct 2026 DNSMOS benchmark on Ethan's quiet-room takes
+    /// The "perfect mic" preset, chosen by the 15 Oct 2026 DNSMOS benchmark on the author's quiet-room takes
     /// (voice-recognition source): DeepFilterNet 3 capped at 35 dB beat both uncapped (muffled voice, SIG 2.7)
     /// and 18 dB (noisier, BAK 2.9); a 30-40 dB cap scored OVRL 2.83 / BAK 3.5-3.9 / SIG 3.1-3.3 against the raw
     /// 1.15 / 1.17 / 1.24. The expander is off: with DFN it changed scores by <0.05 and only risks word tails.

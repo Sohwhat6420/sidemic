@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn a_known_bluetooth_name_is_the_only_thing_looked_for() {
-        let h = hint_for("POCO X6 Pro 5G", "Ethan's POCO", "23122PCD1G");
+        let h = hint_for("POCO X6 Pro 5G", "Alex's POCO", "23122PCD1G");
         assert_eq!(h.names, vec!["POCO X6 Pro 5G".to_string()]);
     }
 
@@ -1407,15 +1407,15 @@ mod tests {
         // HyperOS sends bt:"" when Bluetooth is off: the S24 (the only paired source) must still not match
         let h = hint_for("", "POCO X6 Pro", "23122PCD1G");
         assert_eq!(h.names, vec!["POCO X6 Pro".to_string(), "23122PCD1G".to_string()]);
-        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra"]), None);
-        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra", "POCO X6 Pro 5G"]), Some(1));
+        assert_eq!(h.pick(&["Alex's Galaxy S24 Ultra"]), None);
+        assert_eq!(h.pick(&["Alex's Galaxy S24 Ultra", "POCO X6 Pro 5G"]), Some(1));
     }
 
     #[test]
     fn before_any_hello_nothing_matches() {
         let h = hint_for("", "", "");
         assert!(h.names.is_empty());
-        assert_eq!(h.pick(&["Ethan's Galaxy S24 Ultra"]), None);
+        assert_eq!(h.pick(&["Alex's Galaxy S24 Ultra"]), None);
         assert_eq!(hint_for("", "Same", "Same").names.len(), 1);
     }
 
@@ -1424,7 +1424,7 @@ mod tests {
         // Only the name match. Whether an open link is kept or closed is decided in a2dp_sm (tested there).
         let poco = hint_for("POCO X6 Pro 5G", "", "");
         assert!(poco.matches("POCO X6 Pro 5G"));
-        assert!(!poco.matches("Ethan's Galaxy S24 Ultra"));
+        assert!(!poco.matches("Alex's Galaxy S24 Ultra"));
     }
 
     use super::{a2dp_report, parse_mode, wants_speaker, A2dpReport};

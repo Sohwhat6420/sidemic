@@ -113,7 +113,7 @@ Mode 1. After the preamble and status 0, the eight messages below are exchanged 
 | P8 | phone → PC | `PhoneConfirm` | AEAD(`k_phone`, counter 1, empty plaintext, AD = `TH7`) | 16 |
 
 - `pc_static` and `phone_static` are each side's long-term **X25519 public key** (§4.4).
-- `pc_name` and `phone_name` are UTF-8 display names of **at most 80 bytes**, for example `ETHAN-LAPTOP` and `Ethan's Galaxy S24 Ultra`. They are shown in the paired-devices lists only; nothing trusts them.
+- `pc_name` and `phone_name` are UTF-8 display names of **at most 80 bytes**, for example `ALEX-LAPTOP` and `Alex's Galaxy S24 Ultra`. They are shown in the paired-devices lists only; nothing trusts them.
 - The PC checks in P2 that `phone_id` equals the `id` it saw in the TXT record of the phone the user picked, and aborts otherwise.
 
 ### 4.3 SPAKE2, the transcript and the keys

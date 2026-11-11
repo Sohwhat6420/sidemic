@@ -512,7 +512,7 @@ public class SpikeService extends Service {
     };
 
     /**
-     * Test rig only (Ethan approved, 17 Oct): on Claude's own test phone, put Wireless debugging back on whenever it
+     * Test rig only (owner-approved, 17 Oct): on a dedicated test phone, put Wireless debugging back on whenever it
      * is found off, not only at boot. Measured 17 Oct: HyperOS switched it off by itself at ~19:49 with no reboot.
      * Logs every time it finds it off, so how often that happens is a result too.
      */
