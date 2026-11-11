@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::adb::CTL_PORT;
+use crate::adb::ctl_port;
 
 #[derive(Debug)]
 pub enum PhoneEvent {
@@ -36,7 +36,7 @@ pub struct PhoneControl {
 impl PhoneControl {
     /// Connects and starts a reader thread. Returns false when the phone server isn't answering yet.
     pub fn connect(&self, events: Sender<PhoneEvent>) -> bool {
-        let Ok(sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], CTL_PORT).into(), Duration::from_secs(1)) else {
+        let Ok(sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], ctl_port()).into(), Duration::from_secs(1)) else {
             return false;
         };
         let Ok(read) = sock.try_clone() else { return false };

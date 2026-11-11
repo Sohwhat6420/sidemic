@@ -6,14 +6,34 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 use sha2::{Digest, Sha256};
 use tpl_voice::{NsKind, Params, Strength};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-pub const MIC_PORT: u16 = 27183;
-pub const CTL_PORT: u16 = 27184;
+/// The local ports the phone's two sockets are forwarded to by default. If one is taken (another program, or a
+/// listener the shared adb server leaked and still holds), adb is asked for any free port instead; the port in
+/// use is kept in `MIC`/`CTL` and read through `mic_port()`/`ctl_port()`.
+const MIC_PORT: u16 = 27183;
+const CTL_PORT: u16 = 27184;
+static MIC: AtomicU16 = AtomicU16::new(MIC_PORT);
+static CTL: AtomicU16 = AtomicU16::new(CTL_PORT);
+
+/// The local port the phone's mic socket is forwarded to right now.
+pub fn mic_port() -> u16 {
+    MIC.load(Ordering::Relaxed)
+}
+
+/// The local port the phone's control socket is forwarded to right now.
+pub fn ctl_port() -> u16 {
+    CTL.load(Ordering::Relaxed)
+}
+
+/// The port `adb forward tcp:0 …` printed (it prints the free port it chose, alone on a line).
+fn parse_forward_port(stdout: &str) -> Option<u16> {
+    stdout.lines().map(str::trim).find(|l| !l.is_empty())?.parse::<u16>().ok().filter(|&p| p != 0)
+}
 const REMOTE_DIR: &str = "/data/local/tmp/tpl";
 const JAR: &str = "tpl-server.jar";
 const VOICE_LIB: &str = "libtpl_voice_jni.so";
@@ -355,15 +375,36 @@ impl Adb {
         if let Some(err) = child.stderr.take() {
             pipe_to_log(err);
         }
-        self.run(&["-s", serial, "forward", &format!("tcp:{MIC_PORT}"), "localabstract:tpl_mic"])?;
-        self.run(&["-s", serial, "forward", &format!("tcp:{CTL_PORT}"), "localabstract:tpl_ctl"])?;
+        let mic = self.forward(serial, MIC_PORT, "tpl_mic")?;
+        let ctl = self.forward(serial, CTL_PORT, "tpl_ctl")?;
+        MIC.store(mic, Ordering::Relaxed);
+        CTL.store(ctl, Ordering::Relaxed);
+        crate::log::line(format!("forwarded: mic on port {mic}, control on port {ctl}"));
         Ok(child)
+    }
+
+    /// Forwards `localabstract:<socket>` on the phone to `preferred` on this machine, or, if that port cannot be
+    /// bound, to a free port adb picks (`tcp:0`). Returns the port in use.
+    fn forward(&self, serial: &str, preferred: u16, socket: &str) -> Result<u16, String> {
+        let remote = format!("localabstract:{socket}");
+        match self.run(&["-s", serial, "forward", &format!("tcp:{preferred}"), &remote]) {
+            Ok(_) => Ok(preferred),
+            Err(first) => {
+                let out = self
+                    .run(&["-s", serial, "forward", "tcp:0", &remote])
+                    .map_err(|e| format!("forward {socket}: port {preferred} failed ({first}); any free port failed ({e})"))?;
+                let port = parse_forward_port(&out)
+                    .ok_or_else(|| format!("forward {socket}: adb chose a port but printed {:?}", out.trim()))?;
+                crate::log::line(format!("port {preferred} unavailable for {socket} ({first}); using port {port}"));
+                Ok(port)
+            }
+        }
     }
 
     pub fn stop_server(&self, serial: &str) {
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
-        let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{MIC_PORT}")]);
-        let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{CTL_PORT}")]);
+        let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", mic_port())]);
+        let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", ctl_port())]);
     }
 }
 
@@ -447,6 +488,16 @@ fn server_args(strength: Strength, env: impl Fn(&str) -> Option<String>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_port_adb_chose() {
+        assert_eq!(parse_forward_port("27185\n"), Some(27185));
+        assert_eq!(parse_forward_port("\r\n  50213\r\n"), Some(50213));
+        assert_eq!(parse_forward_port(""), None);
+        assert_eq!(parse_forward_port("0\n"), None);
+        assert_eq!(parse_forward_port("error: cannot bind listener\n"), None);
+        assert_eq!(parse_forward_port("70000\n"), None);
+    }
 
     fn no_env(_: &str) -> Option<String> {
         None

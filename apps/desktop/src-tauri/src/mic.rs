@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::{eCapture, eRender};
 
-use crate::adb::MIC_PORT;
+use crate::adb::mic_port;
 use crate::echo;
 use crate::wasapi::{self, Capture, Render, RATE};
 
@@ -114,7 +114,7 @@ struct PhoneStream {
 
 impl PhoneStream {
     fn connect() -> std::io::Result<PhoneStream> {
-        let sock = TcpStream::connect_timeout(&([127, 0, 0, 1], MIC_PORT).into(), Duration::from_millis(500))?;
+        let sock = TcpStream::connect_timeout(&([127, 0, 0, 1], mic_port()).into(), Duration::from_millis(500))?;
         sock.set_nodelay(true)?;
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RATE as usize)));
         let alive = Arc::new(AtomicBool::new(true));
