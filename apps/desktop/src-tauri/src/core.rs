@@ -63,7 +63,7 @@ struct Settings {
     mic_mode: MicMode,
     audio_mode: AudioMode,
     smart_auto: bool,
-    /// Auto-start was switched on at first run (his ruling: start with Windows); after that it's his switch.
+    /// Auto-start was switched on at first run (the owner's choice: start with Windows); after that it's the user's switch.
     autostart_set: bool,
     /// Set while paused: the settings to put back on Resume. Pausing means laptop mic, phone audio on the
     /// phone, and nothing automatic — Windows as if the app weren't there, but Discord keeps a working mic.
