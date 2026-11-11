@@ -4,44 +4,37 @@
 
 # Sidemic
 
-**Your Android phone becomes your PC's microphone, and your phone's music plays on your PC speakers.**<br>
-Wireless, automatic, and nothing to install on the phone.
+**Your Android phone becomes your PC's wireless microphone, with nothing installed on the phone.**
 
-[![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](#requirements)
-[![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84?logo=android&logoColor=white)](#requirements)
-[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app/)
-[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
 [![test](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-pre--release-orange)](#roadmap)
 
 <img src="docs/assets/hero.png" alt="The Sidemic window and tray flyout on Windows 11" width="100%">
 
-[What it does](#what-it-does) ·
 [How it works](#how-it-works) ·
 [Getting started](#getting-started) ·
-[Numbers](#the-numbers) ·
+[The numbers](#the-numbers) ·
 [Roadmap](#roadmap) ·
 [Build from source](#build-from-source)
 
 </div>
 
----
+- **Nothing on the phone.** The PC pushes a small Java server over wireless adb and runs it as the shell user, the
+  trick scrcpy uses. There is no app to install, so there are no adverts and no time limit.
+- **Your voice is cleaned on the phone.** DeepFilterNet 3 runs on the phone's CPU at 3.9 ms per 10 ms block, so the
+  PC spends nothing on it. Voice quality (DNSMOS overall) goes from 1.16 to 2.66 at the default setting.
+- **About 8 MB in the tray.** 0.03 % CPU at idle, down from about 800 MB and a whole core
+  ([how](docs/efficiency.md)). The phone's music can also play on your PC speakers.
 
-**Why it's interesting, in four numbers** (all measured; method under [The numbers](#the-numbers)):
+## Quick start
 
-| | |
-| --- | --- |
-| **0** apps installed on the phone | The PC pushes a small Java server over wireless adb and runs it with `app_process` as the shell user (the trick scrcpy uses) |
-| **1.16 → 2.66** voice quality (DNSMOS overall) | DeepFilterNet 3 noise removal runs **on the phone's CPU**, 3.9 ms per 10 ms block, so the PC spends nothing on it. Strength is a setting; the default keeps the voice's highs ([why](#voice-cleaning-strength)) |
-| **~9 MB, 0.03% CPU** idle in the tray | Down from ~800 MB and a whole core, fixed one API call at a time ([write-up](docs/efficiency.md)) |
-| **81** automated tests | Smart auto is a pure Rust state machine (events in, actions out) with table-driven scenarios; CI runs them on every push |
-
-**Quick start** (build from source; Windows 11, Rust, Node 18+):
+Windows 11 and Android 12 or later. The installer comes with the v0.1.0 pre-release; until then, build from source.
+Smart auto, the part that decides when the mic goes live, runs without a phone:
 
 ```bash
 git clone https://github.com/Sohwhat6420/sidemic && cd sidemic
-cargo test -p tpl-policy   # Smart auto's 15 scenario tests: no phone, no Android SDK
+cargo test -p tpl-policy   # Smart auto: 15 tests, 40 scenario cases
 ```
 
 The full app also needs the Android SDK for the phone side: see [Build from source](#build-from-source).
@@ -62,7 +55,7 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 <tr>
 <td width="50%" valign="top">
 
-### 🎙️ Phone as your PC mic
+### Phone as your PC mic
 - Turns on by itself when any app starts listening, and off when it stops.
 - Noise removal runs **on the phone** (DeepFilterNet 3), so your PC spends nothing on it mid-game. Off, Light,
   Medium or Strong, from the Microphone page.
@@ -71,7 +64,7 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 </td>
 <td width="50%" valign="top">
 
-### 🔊 Phone audio on your PC speakers
+### Phone audio on your PC speakers
 - Phone media plays through the PC's speakers over Bluetooth, with no re-pairing.
 - Short laptop sounds (a Discord ping) briefly duck the phone instead of taking over.
 - Real laptop media hands the speakers back, and the phone carries on playing on its own speaker.
@@ -81,7 +74,7 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 <tr>
 <td width="50%" valign="top">
 
-### 🧠 Smart auto that learns
+### Smart auto that learns
 - Sensible defaults, not hard-coded rules.
 - Asks once per game whether phone audio may use the speakers, then remembers.
 - Every decision is listed with an **Undo**, and undoing it teaches it the other way.
@@ -89,8 +82,8 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 </td>
 <td width="50%" valign="top">
 
-### 🪶 Light enough to forget about
-- Idle in the tray: **one process, ~9 MB, 0.03% CPU**.
+### Light enough to forget about
+- Idle in the tray: **one process, ~8 MB, 0.03% CPU**.
 - The flyout's web view loads on click and unloads after two minutes.
 - Follows your Windows accent colour, and shows your phone's own wallpaper.
 
@@ -119,14 +112,14 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 
 </details>
 
-<sub>Screenshots are rendered from the real UI files with a stubbed backend, so they carry no real device names or
+<sub>Screenshots are rendered from the real UI files with a stubbed backend, so they carry no real serials or
 addresses: `node docs/screenshots/render.mjs` rebuilds them.</sub>
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    subgraph phone["📱 Android phone"]
+    subgraph phone["Android phone"]
         direction TB
         srv["tpl-server<br/><sub>app_process, shell user</sub>"]
         dsp["Voice chain<br/><sub>DeepFilterNet 3 → leveller → limiter</sub>"]
@@ -135,7 +128,7 @@ flowchart LR
         srv --- media
     end
 
-    subgraph pc["💻 Windows PC"]
+    subgraph pc["Windows PC"]
         direction TB
         app["Sidemic<br/><sub>Rust + Tauri tray app</sub>"]
         policy["Smart auto<br/><sub>pure Rust policy crate</sub>"]
@@ -190,8 +183,8 @@ flowchart LR
 
 | Phone | Software | Mic | Phone audio on the PC | What's playing, play/pause | Switches it needs |
 | --- | --- | --- | --- | --- | --- |
-| Samsung Galaxy S24 Ultra | One UI 8, Android 16 | ✅ | ✅ | ✅ | Wireless debugging; Auto Blocker off; Disable adb authorisation timeout |
-| Xiaomi POCO X6 Pro 5G | HyperOS 2.0, Android 15 | ✅ screen on and off | not tested yet | ✅ (YouTube) | Wireless debugging; USB debugging (Security settings)¹ |
+| Samsung Galaxy S24 Ultra | One UI 8, Android 16 | Yes | Yes | Yes | Wireless debugging; Auto Blocker off; Disable adb authorisation timeout |
+| Xiaomi POCO X6 Pro 5G | HyperOS 2.0, Android 15 | Yes, screen on and off | not tested yet | Yes (YouTube) | Wireless debugging; USB debugging (Security settings)¹ |
 | Other Xiaomi, Redmi, POCO | HyperOS / MIUI | likely, untested | likely | likely | as the POCO |
 | OPPO, realme, OnePlus | ColorOS / OxygenOS | untested | untested | untested | Wireless debugging; Disable permission monitoring² |
 | Pixel and other stock Android 12+ | Android 12+ | untested | untested | untested | Wireless debugging |
@@ -267,7 +260,7 @@ recorded raw and run through the phone's voice chain.
 
 | | |
 | --- | --- |
-| PC, idle in the tray | ~9 MB, 0.03% CPU |
+| PC, idle in the tray | ~8 MB, 0.03% CPU |
 | PC, flyout open | ~107 MB |
 | Phone, idle | ~71 MB PSS, 0.2% of one core |
 | Phone, mic live | 39% of one core |
