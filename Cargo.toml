@@ -5,7 +5,7 @@ members = ["crates/voice", "crates/voice-bench", "crates/voice-jni", "crates/pol
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Sohwhat6420/true-phone-link"
+repository = "https://github.com/Sohwhat6420/sidemic"
 
 [profile.release]
 opt-level = 3

@@ -12,7 +12,7 @@ Wireless, automatic, and nothing to install on the phone.
 [![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app/)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![test](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml)
+[![test](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml)
 [![Status](https://img.shields.io/badge/status-pre--release-orange)](#roadmap)
 
 <img src="docs/assets/hero.png" alt="The Sidemic window and tray flyout on Windows 11" width="100%">
@@ -40,7 +40,7 @@ Wireless, automatic, and nothing to install on the phone.
 **Quick start** (build from source; Windows 11, Rust, Node 18+):
 
 ```bash
-git clone https://github.com/Sohwhat6420/true-phone-link && cd true-phone-link
+git clone https://github.com/Sohwhat6420/sidemic && cd sidemic
 cargo test -p tpl-policy   # Smart auto's 15 scenario tests: no phone, no Android SDK
 ```
 
