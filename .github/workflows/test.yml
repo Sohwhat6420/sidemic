@@ -1,0 +1,17 @@
+name: test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The Tauri build script checks that the bundled phone files exist. The tests don't use them, and building the
+      # real ones needs the Android SDK, so CI puts empty stand-ins where they go.
+      - name: Stand-in phone artefacts
+        shell: bash
+        run: mkdir -p phone-server/out && touch phone-server/out/tpl-server.jar phone-server/out/libtpl_voice_jni.so
+      - name: Smart auto scenarios and desktop unit tests
+        run: cargo test -p tpl-policy -p tpl-desktop

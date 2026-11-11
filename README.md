@@ -12,7 +12,8 @@ Wireless, automatic, and nothing to install on the phone.
 [![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app/)
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-live%20testing-orange)](#roadmap)
+[![test](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml)
+[![Status](https://img.shields.io/badge/status-pre--release-orange)](#roadmap)
 
 <img src="docs/assets/hero.png" alt="The Sidemic window and tray flyout on Windows 11" width="100%">
 
@@ -26,6 +27,24 @@ Wireless, automatic, and nothing to install on the phone.
 </div>
 
 ---
+
+**Why it's interesting, in four numbers** (all measured; method under [The numbers](#the-numbers)):
+
+| | |
+| --- | --- |
+| **0** apps installed on the phone | The PC pushes a small Java server over wireless adb and runs it with `app_process` as the shell user (the trick scrcpy uses) |
+| **1.15 → 2.83** voice quality (DNSMOS overall) | DeepFilterNet 3 noise removal runs **on the phone's CPU**, 3.9 ms per 10 ms block, so the PC spends nothing on it |
+| **~9 MB, 0.03% CPU** idle in the tray | Down from ~800 MB and a whole core, fixed one API call at a time ([write-up](docs/efficiency.md)) |
+| **77** automated tests | Smart auto is a pure Rust state machine (events in, actions out) with table-driven scenarios; CI runs them on every push |
+
+**Quick start** (build from source; Windows 11, Rust, Node 18+):
+
+```bash
+git clone https://github.com/Sohwhat6420/true-phone-link && cd true-phone-link
+cargo test -p tpl-policy   # Smart auto's 15 scenario tests: no phone, no Android SDK
+```
+
+The full app also needs the Android SDK for the phone side: see [Build from source](#build-from-source).
 
 ## Why
 
@@ -99,6 +118,9 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 
 </details>
 
+<sub>Screenshots are rendered from the real UI files with a stubbed backend, so they carry no real device names or
+addresses: `node docs/screenshots/render.mjs` rebuilds them.</sub>
+
 ## How it works
 
 ```mermaid
@@ -140,7 +162,7 @@ flowchart LR
 ## Getting started
 
 > [!NOTE]
-> Sidemic is in a one-week live test on the author's own laptop and phone. There's no installer release
+> Sidemic has been installed on the author's own laptop, with their phone, since 27 Oct 2026. There's no public installer
 > yet; until v1 you [build it from source](#build-from-source).
 
 ### Requirements
@@ -257,6 +279,15 @@ and through the phone's voice chain.
 The PC side once used ~800 MB and a whole core. [docs/efficiency.md](docs/efficiency.md) shows how that was found
 and fixed, one API call at a time.
 
+## Known limits
+
+- **Echo.** When the laptop speakers play while the phone mic is live, the echo left after cancellation measured
+  a mean of -43.6 dB against a -50 dB target (POCO X6 Pro, 26 Oct 2026); the cause isn't pinned down yet.
+- **Wireless debugging is the only link**, so the phone needs Developer options and one tap on the tile after
+  each restart (see the caution above).
+- **Tested on two phones and one laptop.** Other phones are listed as untested in the compatibility table.
+- **No signed installer yet.**
+
 ## Roadmap
 
 - [x] Phone mic with on-phone noise removal, laptop-mic fallback
@@ -264,7 +295,7 @@ and fixed, one API call at a time.
 - [x] Smart auto with Undo and per-game memory
 - [x] Tray flyout and full window, Windows accent and phone wallpaper
 - [x] Pause / Resume, and recovery if the window ever stops responding
-- [ ] One-week live test (in progress)
+- [x] Installed on the author's laptop (since 27 Oct 2026)
 - [ ] Home-screen control panel on the phone (a web app, nothing to install)
 - [ ] **Optional companion app** for v1: no Developer options, no tap after a phone restart, and a Quick
       Settings tile
