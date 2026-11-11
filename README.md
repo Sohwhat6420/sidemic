@@ -11,7 +11,7 @@ Wireless, automatic, and nothing to install on the phone.
 [![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84?logo=android&logoColor=white)](#requirements)
 [![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app/)
-[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
 [![test](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/true-phone-link/actions/workflows/test.yml)
 [![Status](https://img.shields.io/badge/status-pre--release-orange)](#roadmap)
 
@@ -364,4 +364,5 @@ adb shell CLASSPATH=/data/local/tmp/tpl/tpl-server.jar app_process / com.truepho
 
 ## Licence
 
-[Apache-2.0](LICENSE).
+[MIT](LICENSE). Two phone-server files derived from scrcpy (`FakeContext.java`, `Workarounds.java`) stay under
+[Apache-2.0](LICENSE-APACHE), as their headers and [NOTICE](NOTICE) say.

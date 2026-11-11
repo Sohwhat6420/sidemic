@@ -22,8 +22,8 @@
       "../../../phone-server/out/libtpl_voice_jni.so": "phone/libtpl_voice_jni.so",
       "icons/tray.png": "tray.png"
     },
-    "copyright": "Copyright 2026 Ethan (Sidemic contributors)",
-    "license": "Apache-2.0",
+    "copyright": "Copyright 2026 Ethan Soh",
+    "license": "MIT",
     "windows": {
       "nsis": {
         "installMode": "currentUser"
