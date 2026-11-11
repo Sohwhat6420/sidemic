@@ -19,6 +19,8 @@ use tpl_policy::{
     friendly_name, Action, AudioMode, Config, DecisionKind, Engine, Event, Memory, MicMode, MicRoute, Placement, Situation,
 };
 
+use tpl_voice::Strength;
+
 use crate::adb::{Adb, DeviceState};
 use crate::mic::{self, MicStatus, Route};
 use crate::phone::{PhoneControl, PhoneEvent};
@@ -75,6 +77,16 @@ struct Settings {
     aec_delay_ms: u32,
     /// While echo cancelling is down: false = the raw phone mic, true = silence.
     aec_fallback_silence: bool,
+    /// How hard the phone removes noise: "off", "light", "medium" or "strong" (`tpl_voice::Strength`). Settings
+    /// files from before 11 Nov 2026 have no such field and get "medium", not the old 35 dB ("strong").
+    voice_cleaning: String,
+}
+
+impl Settings {
+    /// The stored strength; anything unreadable counts as the default.
+    fn strength(&self) -> Strength {
+        self.voice_cleaning.parse().unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -95,6 +107,7 @@ impl Default for Settings {
             auto_switch: false,
             aec_delay_ms: 0,
             aec_fallback_silence: false,
+            voice_cleaning: Strength::default().as_str().into(),
         }
     }
 }
@@ -183,6 +196,12 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
     mic::spawn(mic_rx, mic_status.clone(), note_tx);
     forward(note_rx, tx.clone(), Msg::MicNote);
 
+    // Read before the adb thread starts: it reads both mirrors when it starts the phone server.
+    let settings: Settings =
+        fs::read_to_string(data_dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    AUTO_SWITCH.store(settings.auto_switch, Ordering::Relaxed);
+    crate::adb::set_strength(settings.strength());
+
     // The phone link.
     let ctl = PhoneControl::default();
     let (ptx, prx) = mpsc::channel::<PhoneEvent>();
@@ -209,8 +228,6 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
         thread::Builder::new().name("tpl-laptop".into()).spawn(move || laptop_thread(tx)).unwrap();
     }
 
-    let settings: Settings =
-        fs::read_to_string(data_dir.join("settings.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let memory = fs::read_to_string(data_dir.join("memory.json"))
         .ok()
         .and_then(|s| Memory::from_json(&s).ok())
@@ -218,7 +235,6 @@ pub fn start(app: AppHandle, data_dir: PathBuf, phone_dir: PathBuf) -> Handle {
 
     let known: BTreeMap<String, String> =
         fs::read_to_string(data_dir.join("phone-names.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    AUTO_SWITCH.store(settings.auto_switch, Ordering::Relaxed);
     crate::echo::DELAY_MS.store(settings.aec_delay_ms.min(crate::echo::MAX_DELAY_MS), Ordering::Relaxed);
     crate::echo::FALLBACK_SILENCE.store(settings.aec_fallback_silence, Ordering::Relaxed);
 
@@ -606,6 +622,16 @@ impl Core {
                 self.save_settings();
                 log::line(format!("when echo cancelling is down: {}", if silence { "silence" } else { "the raw phone mic" }));
             }
+            "voice_cleaning" => {
+                if let Some(s) = arg.and_then(|a| a.parse::<Strength>().ok()) {
+                    if s != self.settings.strength() {
+                        self.settings.voice_cleaning = s.as_str().into();
+                        self.save_settings();
+                        crate::adb::set_strength(s);
+                        RESTART_SERVER.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
             "toggle_auto_switch" => {
                 self.settings.auto_switch = !self.settings.auto_switch;
                 AUTO_SWITCH.store(self.settings.auto_switch, Ordering::Relaxed);
@@ -775,10 +801,11 @@ impl Core {
             _ => "off",
         };
         let level_db = self.mic.level.load(Ordering::Relaxed) as f64 / 10.0 - 100.0;
+        let phone_ms = crate::adb::phone_latency_ms(self.settings.strength());
         if live != self.last_live {
             log::line(format!(
-                "mic now: {live} (mic delay {} ms incl. 32 ms on the phone)",
-                self.mic.delay_ms.load(Ordering::Relaxed) + 32
+                "mic now: {live} (mic delay {} ms incl. {phone_ms} ms on the phone)",
+                self.mic.delay_ms.load(Ordering::Relaxed) + phone_ms
             ));
             self.last_live = live.to_owned();
         }
@@ -836,6 +863,7 @@ impl Core {
             "auto_switch": self.settings.auto_switch,
             "aec_delay_ms": self.settings.aec_delay_ms,
             "aec_fallback_silence": self.settings.aec_fallback_silence,
+            "voice_cleaning": self.settings.voice_cleaning,
             "device": {"name": self.name},
             "battery": if connected { self.battery } else { None },
             "charging": self.charging,
@@ -848,7 +876,7 @@ impl Core {
             "paused": self.settings.paused.is_some(),
             "mic": {
                 "mode": st.mic_mode, "live": live, "app": st.mic_users.first().map(|a| friendly_name(a)),
-                "level_db": level_db, "delay_ms": self.mic.delay_ms.load(Ordering::Relaxed) + 32, "why": mic_why,
+                "level_db": level_db, "delay_ms": self.mic.delay_ms.load(Ordering::Relaxed) + phone_ms, "why": mic_why,
             },
             "audio": {
                 "mode": st.audio_mode, "on_speaker": st.phone_audio == Placement::Speaker, "available": st.a2dp_available,
@@ -993,6 +1021,10 @@ static PICK: Mutex<Option<String>> = Mutex::new(None);
 /// The auto-switch setting, mirrored here for the adb thread.
 static AUTO_SWITCH: AtomicBool = AtomicBool::new(false);
 
+/// Set when "Voice cleaning" changes: the phone server reads its chain settings at start, so the adb thread
+/// restarts it (the phone mic drops for a few seconds).
+static RESTART_SERVER: AtomicBool = AtomicBool::new(false);
+
 /// How long the chosen phone must be missing before auto-switch moves to another (adb's mDNS blips for seconds).
 const SWITCH_AFTER: Duration = Duration::from_secs(15);
 /// How often the phone list is refreshed while the phone is connected (each refresh is one `adb devices`).
@@ -1033,6 +1065,10 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
         ctl.disconnect();
     };
     loop {
+        if RESTART_SERVER.swap(false, Ordering::Relaxed) && server.is_some() {
+            log::line(format!("voice cleaning now {}: restarting the phone server", crate::adb::strength().as_str()));
+            drop_link(&mut server);
+        }
         if let Some(p) = PICK.lock().unwrap().take() {
             if stand_in.as_deref() == Some(p.as_str()) {
                 // He picked the phone the link is already standing in on: it becomes his phone, no restart.
@@ -1394,7 +1430,23 @@ fn diff(old: &mut BTreeSet<String>, new: BTreeSet<String>, tx: &Sender<Msg>, mk:
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_for, refusal_hint};
+    use super::{hint_for, refusal_hint, Settings, Strength};
+
+    #[test]
+    fn voice_cleaning_is_saved_and_old_settings_files_get_medium() {
+        // A settings file from before the setting existed: every other field kept, voice cleaning at the new default.
+        let old = r#"{"mic_mode":"phone","audio_mode":"auto","smart_auto":false,"aec_delay_ms":120}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!((s.strength(), s.aec_delay_ms, s.smart_auto), (Strength::Medium, 120, false));
+        for want in Strength::ALL {
+            let saved = serde_json::to_string(&Settings { voice_cleaning: want.as_str().into(), ..Settings::default() }).unwrap();
+            assert!(saved.contains(&format!(r#""voice_cleaning":"{}""#, want.as_str())), "{saved}");
+            assert_eq!(serde_json::from_str::<Settings>(&saved).unwrap().strength(), want);
+        }
+        // A hand-edited or future value never breaks loading: it reads as the default.
+        let odd: Settings = serde_json::from_str(r#"{"voice_cleaning":"extreme"}"#).unwrap();
+        assert_eq!(odd.strength(), Strength::Medium);
+    }
 
     #[test]
     fn a_known_bluetooth_name_is_the_only_thing_looked_for() {

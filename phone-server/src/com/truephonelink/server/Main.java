@@ -32,7 +32,7 @@ import java.util.Map;
  * Common keys: source=voice-recognition|camcorder|unprocessed|mic|voice-communication|voice-performance
  *              channels=1|2  mix=avg|left|right  ns|agc|aec=on|off|default  dsp=1|0  debug=1
  *              engine=native|java  denoise=dfn|rnnoise|none  atten=35  lib=/data/local/tmp/tpl/libtpl_voice_jni.so
- *              target=-20 maxgain=24 gate=-50 expand=0 (native) / -8 (java) ceiling=-1.5 presence=3
+ *              target=-20 maxgain=18 gate=-50 expand=0 (native) / -8 (java) ceiling=-1.5 presence=3
  */
 public final class Main {
 
@@ -131,7 +131,7 @@ public final class Main {
      */
     private static VoiceChain chain(Map<String, String> o) {
         float target = Float.parseFloat(get(o, "target", "-20"));
-        float maxGain = Float.parseFloat(get(o, "maxgain", "24"));
+        float maxGain = Float.parseFloat(get(o, "maxgain", "18"));
         float ceiling = Float.parseFloat(get(o, "ceiling", "-1.5"));
         float presence = Float.parseFloat(get(o, "presence", "3"));
         if (!"java".equals(get(o, "engine", "native")) && NativeVoice.load(get(o, "lib", NativeVoice.DEFAULT_LIB))) {

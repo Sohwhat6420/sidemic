@@ -1,12 +1,14 @@
 //! Offline runner for the voice chain: WAV in (48 kHz, 16-bit, mono or stereo) -> chain -> WAV out.
 //!
-//!   voice-bench IN.wav OUT.wav [mix=avg|left|right] [ns=none|rnnoise|dfn] [atten=100] [level=1|0]
-//!               [target=-20] [maxgain=24] [gate=-50] [expand=-8] [ceiling=-1.5] [presence=3] [hp=90]
+//!   voice-bench IN.wav OUT.wav [strength=off|light|medium|strong] [mix=avg|left|right] [ns=none|rnnoise|dfn]
+//!               [atten=100] [level=1|0] [target=-20] [maxgain=18] [mingain=-12] [rise=6] [fall=20] [gate=-50]
+//!               [expand=-8] [ceiling=-1.5] [presence=3] [hp=90]
 //!
+//! `strength=` starts from the app's "Voice cleaning" preset; keys after it override single values.
 //! Prints the real-time factor, so the same run doubles as a CPU benchmark.
 
 use std::time::Instant;
-use tpl_voice::{Chain, NsKind, Params, BLOCK};
+use tpl_voice::{Chain, NsKind, Params, Strength, BLOCK};
 
 fn main() {
     if let Err(e) = run() {
@@ -26,6 +28,7 @@ fn run() -> Result<(), String> {
         let (k, v) = kv.split_once('=').ok_or(format!("expected key=value, got {kv}"))?;
         let f = || v.parse::<f32>().map_err(|e| format!("{k}: {e}"));
         match k {
+            "strength" => p = Params::for_strength(v.parse::<Strength>()?),
             "mix" => mix = v.to_string(),
             "ns" => p.ns = v.parse::<NsKind>()?,
             "atten" => p.ns_atten_db = f()?,
@@ -37,6 +40,9 @@ fn run() -> Result<(), String> {
             "ceiling" => p.ceiling_db = f()?,
             "presence" => p.presence_db = f()?,
             "hp" => p.high_pass_hz = f()?,
+            "rise" => p.rise_db_per_sec = f()?,
+            "fall" => p.fall_db_per_sec = f()?,
+            "mingain" => p.min_gain_db = f()?,
             _ => return Err(format!("unknown key {k}")),
         }
     }

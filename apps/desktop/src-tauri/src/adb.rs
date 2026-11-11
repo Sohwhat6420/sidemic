@@ -6,8 +6,10 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use sha2::{Digest, Sha256};
+use tpl_voice::{NsKind, Params, Strength};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const MIC_PORT: u16 = 27183;
@@ -334,17 +336,9 @@ impl Adb {
     /// The returned child is the `adb shell` that hosts it; its stdout carries the server's log.
     pub fn start_server(&self, serial: &str) -> Result<Child, String> {
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
-        // TPL_DENOISE=none|rnnoise|dfn is for A/B measurements (does the phone's DeepFilterNet stage defeat the echo canceller?).
-        let denoise = std::env::var("TPL_DENOISE").ok().filter(|d| d.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "dfn".into());
-        // TPL_DSP=0 bypasses the phone's whole voice chain (noise suppression, speech leveller, limiter): the check
-        // for a time-varying gain in front of the laptop's echo canceller.
-        let dsp = if std::env::var("TPL_DSP").as_deref() == Ok("0") { "0" } else { "1" };
-        // TPL_MAXGAIN=<dB> caps the phone's speech leveller (default 24): the A/B for "does the leveller in front of
-        // the echo canceller spend its gain" (investigations/2026-10-29-echo-sim.md). Test only.
-        let maxgain = maxgain_arg(std::env::var("TPL_MAXGAIN").ok().as_deref());
+        let args = server_args(strength(), |k| std::env::var(k).ok());
         let script = format!(
-            "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve \
-             source=voice-recognition engine=native denoise={denoise} atten=35 dsp={dsp}{maxgain} lib={REMOTE_DIR}/{VOICE_LIB}"
+            "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve {args} lib={REMOTE_DIR}/{VOICE_LIB}"
         );
         let mut child = self
             .cmd()
@@ -394,9 +388,102 @@ fn maxgain_arg(v: Option<&str>) -> String {
     }
 }
 
+/// The "Voice cleaning" setting, mirrored here for the phone server's command line (an index into `Strength::ALL`).
+static STRENGTH: AtomicU8 = AtomicU8::new(2);
+
+pub fn set_strength(s: Strength) {
+    STRENGTH.store(Strength::ALL.iter().position(|&k| k == s).unwrap_or(2) as u8, Ordering::Relaxed);
+}
+
+pub fn strength() -> Strength {
+    Strength::ALL.get(STRENGTH.load(Ordering::Relaxed) as usize).copied().unwrap_or_default()
+}
+
+/// What the phone's voice chain adds to the mic delay: DeepFilterNet's frame and look-ahead (30 ms) plus the
+/// limiter's look-ahead (2 ms), logged by the phone as "latency 31.9 ms"; the limiter alone without it.
+pub fn phone_latency_ms(s: Strength) -> u32 {
+    if s.ns() == NsKind::None {
+        2
+    } else {
+        32
+    }
+}
+
+/// Sources the phone server accepts; `TPL_SOURCE` must be one of them.
+const SOURCES: [&str; 6] = ["voice-recognition", "mic", "camcorder", "voice-communication", "unprocessed", "voice-performance"];
+
+/// The phone server's voice arguments for a strength, plus the A/B overrides read through `env`. Only known words
+/// and plain numbers reach the shell command line.
+///
+/// - `TPL_DENOISE=none|rnnoise|dfn` replaces the suppressor (does the phone's DeepFilterNet defeat the echo
+///   canceller?).
+/// - `TPL_DSP=0` bypasses the phone's whole voice chain: the check for a time-varying gain in front of the laptop's
+///   echo canceller.
+/// - `TPL_MAXGAIN=<dB>` caps the speech leveller (default 18): "does the leveller in front of the echo canceller
+///   spend its gain" (investigations/2026-10-29-echo-sim.md).
+/// - `TPL_SOURCE=<android source>` picks another capture source. On a POCO X6 Pro, voice-recognition and
+///   unprocessed carry a ~25 dB hole from 7.8 to 11.3 kHz and voice-communication stops at 7.8 kHz, while mic and
+///   camcorder are full band (room tone, 11 Nov 2026); the default stays voice-recognition until a spoken A/B on
+///   that phone says otherwise.
+fn server_args(strength: Strength, env: impl Fn(&str) -> Option<String>) -> String {
+    let ns = match strength.ns() {
+        NsKind::None => "none",
+        NsKind::Rnnoise => "rnnoise",
+        NsKind::Dfn => "dfn",
+    };
+    let denoise = env("TPL_DENOISE").filter(|d| ["none", "rnnoise", "dfn"].contains(&d.as_str())).unwrap_or_else(|| ns.into());
+    let dsp = if env("TPL_DSP").as_deref() == Some("0") { "0" } else { "1" };
+    let maxgain = match maxgain_arg(env("TPL_MAXGAIN").as_deref()) {
+        m if m.is_empty() => format!(" maxgain={}", Params::default().max_gain_db),
+        m => m,
+    };
+    let source = env("TPL_SOURCE").filter(|s| SOURCES.contains(&s.as_str())).unwrap_or_else(|| SOURCES[0].into());
+    format!(
+        "source={source} engine=native denoise={denoise} atten={} expand=0 dsp={dsp}{maxgain}",
+        strength.atten_db()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn each_voice_cleaning_strength_reaches_the_phone_command_line() {
+        assert_eq!(
+            server_args(Strength::Medium, no_env),
+            "source=voice-recognition engine=native denoise=dfn atten=18 expand=0 dsp=1 maxgain=18"
+        );
+        assert!(server_args(Strength::Light, no_env).contains(" denoise=dfn atten=12 "));
+        assert!(server_args(Strength::Strong, no_env).contains(" denoise=dfn atten=35 "));
+        assert!(server_args(Strength::Off, no_env).contains(" denoise=none "));
+    }
+
+    #[test]
+    fn the_ab_overrides_pass_only_known_words_and_plain_numbers() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        let a = server_args(Strength::Medium, env(&[("TPL_DENOISE", "rnnoise"), ("TPL_DSP", "0"), ("TPL_MAXGAIN", "12"), ("TPL_SOURCE", "mic")]));
+        assert_eq!(a, "source=mic engine=native denoise=rnnoise atten=18 expand=0 dsp=0 maxgain=12");
+        let b = server_args(Strength::Medium, env(&[("TPL_DENOISE", "dfn; reboot"), ("TPL_SOURCE", "mic lib=/x"), ("TPL_MAXGAIN", "$(id)")]));
+        assert_eq!(b, server_args(Strength::Medium, no_env));
+    }
+
+    #[test]
+    fn the_strength_mirror_round_trips_and_sets_the_phone_delay() {
+        for s in Strength::ALL {
+            set_strength(s);
+            assert_eq!(strength(), s);
+        }
+        set_strength(Strength::default());
+        assert_eq!(phone_latency_ms(Strength::Off), 2);
+        assert_eq!(phone_latency_ms(Strength::Medium), 32);
+    }
 
     #[test]
     fn the_leveller_cap_is_passed_on_only_as_a_plain_number_of_0_to_24_db() {

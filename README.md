@@ -33,9 +33,9 @@ Wireless, automatic, and nothing to install on the phone.
 | | |
 | --- | --- |
 | **0** apps installed on the phone | The PC pushes a small Java server over wireless adb and runs it with `app_process` as the shell user (the trick scrcpy uses) |
-| **1.15 → 2.83** voice quality (DNSMOS overall) | DeepFilterNet 3 noise removal runs **on the phone's CPU**, 3.9 ms per 10 ms block, so the PC spends nothing on it |
+| **1.16 → 2.66** voice quality (DNSMOS overall) | DeepFilterNet 3 noise removal runs **on the phone's CPU**, 3.9 ms per 10 ms block, so the PC spends nothing on it. Strength is a setting; the default keeps the voice's highs ([why](#voice-cleaning-strength)) |
 | **~9 MB, 0.03% CPU** idle in the tray | Down from ~800 MB and a whole core, fixed one API call at a time ([write-up](docs/efficiency.md)) |
-| **77** automated tests | Smart auto is a pure Rust state machine (events in, actions out) with table-driven scenarios; CI runs them on every push |
+| **81** automated tests | Smart auto is a pure Rust state machine (events in, actions out) with table-driven scenarios; CI runs them on every push |
 
 **Quick start** (build from source; Windows 11, Rust, Node 18+):
 
@@ -64,7 +64,8 @@ your PC speakers, and it moves back when you play something on the laptop. You d
 
 ### 🎙️ Phone as your PC mic
 - Turns on by itself when any app starts listening, and off when it stops.
-- Noise removal runs **on the phone** (DeepFilterNet 3), so your PC spends nothing on it mid-game.
+- Noise removal runs **on the phone** (DeepFilterNet 3), so your PC spends nothing on it mid-game. Off, Light,
+  Medium or Strong, from the Microphone page.
 - If the phone drops off, the laptop mic takes over, so you're never silent.
 
 </td>
@@ -242,9 +243,9 @@ wrong, right-click the tray icon and choose **Mark a problem now**; the moment i
 
 ## The numbers
 
-All measured on the author's Acer Nitro laptop and Galaxy S24 Ultra in October 2026. Voice quality is Microsoft's
-[DNSMOS](https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS) score of the same spoken take, recorded raw
-and through the phone's voice chain.
+All measured on the author's Acer Nitro laptop and Galaxy S24 Ultra (October and November 2026). Voice quality is
+Microsoft's [DNSMOS](https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS) score of the same spoken take,
+recorded raw and run through the phone's voice chain.
 
 <table>
 <tr>
@@ -252,12 +253,12 @@ and through the phone's voice chain.
 
 **Voice quality** (DNSMOS, 1–5, higher is better)
 
-| | Raw phone mic | Sidemic |
-| --- | :---: | :---: |
-| Speech | 1.24 | **3.14** |
-| Background | 1.17 | **3.90** |
-| Overall | 1.15 | **2.83** |
-| P.808 | 2.52 | **3.38** |
+| | Raw phone mic | Medium (default) | Strong |
+| --- | :---: | :---: | :---: |
+| Speech | 1.26 | **3.49** | 3.17 |
+| Background | 1.20 | 3.01 | **3.85** |
+| Overall | 1.16 | 2.66 | **2.83** |
+| P.808 | 2.55 | 3.03 | **3.33** |
 
 </td>
 <td valign="top">
@@ -270,11 +271,47 @@ and through the phone's voice chain.
 | PC, flyout open | ~107 MB |
 | Phone, idle | ~71 MB PSS, 0.2% of one core |
 | Phone, mic live | 39% of one core |
-| Mic delay, end to end | ~120 ms (32 ms on the phone) |
+| Mic delay, phone screen on | ~170 ms (32 ms on the phone) |
+| Mic delay, phone screen off | ~330 ms |
 
 </td>
 </tr>
 </table>
+
+### Voice cleaning strength
+
+Until November 2026 the phone removed noise as hard as it could (DeepFilterNet 3 capped at 35 dB), because that
+scored best on DNSMOS. But DNSMOS listens at 16 kHz, so it never heard what that cost above 8 kHz: on three real
+takes the 35 dB cap took the voice's 8–16 kHz down by 19–28 dB, cut the 30–200 ms after each word by 12–18 dB,
+and left 51–56 dB of dead silence between words (the raw mic has 16–20). The speech leveller made it worse: it
+pulled loud syllables down inside words, swinging the gain 6–8 dB within speech. Users heard it as dull and
+detached.
+
+<img src="docs/assets/voice-cleaning-spectrum.png" alt="Line chart of how much of the voice's spectrum each Voice cleaning setting keeps relative to the raw mic, 100 Hz to 16 kHz. Below 3 kHz all settings are within a few dB of each other. Above 3 kHz the old 35 dB setting falls to about -25 dB at 8 to 16 kHz, Medium stays near -11 dB, Light near -7 dB and Off near 0 dB." width="100%">
+
+Strength is now a setting on the Microphone page. DeepFilterNet's cap works as a phase-aligned dry mix (the cap in
+dB sets how much of the unprocessed sound is blended back), so a lighter setting keeps the voice's own highs and
+word tails instead of re-synthesising them.
+
+| Setting | Noise cap | DNSMOS speech / overall | Voice 8–16 kHz kept | Word tails | Leveller pumping |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Off | none | 1.90 / 1.39 | −3 dB | −1 dB | 20 dB/s |
+| Light | 12 dB | 3.50 / 2.49 | −7 dB | −8 dB | 10 dB/s |
+| **Medium (default)** | 18 dB | **3.49 / 2.66** | **−11 dB** | **−10 dB** | **8 dB/s** |
+| Strong | 35 dB | 3.17 / 2.83 | −18 dB | −19 dB | 8 dB/s |
+| *Before (35 dB, old leveller)* | 35 dB | 3.17 / 2.83 | −18 dB | −18 dB | 17 dB/s |
+
+Take 1 of three (voice-recognition source, Galaxy S24 Ultra). On the other two, Medium and Strong are within 0.06 on
+DNSMOS overall (2.54 vs 2.56, 2.49 vs 2.55) and Medium scores 0.2–0.3 higher on speech. "Leveller pumping" is the
+95th percentile of how fast its gain moves inside speech. The leveller now falls at 20 dB/s instead of 60 and adds
+at most +18 dB instead of +24, at every setting. Measured with
+`voice-bench` (`strength=medium` and so on) and the DNSMOS ONNX models.
+
+**Where the mic delay goes.** About 20 ms of capture, 32 ms of look-ahead on the phone (DeepFilterNet 30 ms plus
+the limiter's 2 ms), the network jitter buffer, up to 10 ms of echo-cancelling framing and 40 ms in the virtual
+cable. The jitter buffer is the big one: its median was 67 ms with the phone's screen on and 230 ms with it off,
+because Wi-Fi power saving delivers the audio in bursts. Keep the phone's screen on, or plugged in, for the
+shortest delay.
 
 The PC side once used ~800 MB and a whole core. [docs/efficiency.md](docs/efficiency.md) shows how that was found
 and fixed, one API call at a time.
