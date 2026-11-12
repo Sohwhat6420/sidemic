@@ -225,38 +225,67 @@ pub fn parse_listening(proc_net_tcp: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Where adb may be, in order: TPL_ADB, the app's bundled copy, winget's scrcpy and platform-tools packages,
+/// winget's links folder, Android Studio's SDK, then each PATH folder. winget's folders and the SDK are searched
+/// by name because a tray app started at sign-in keeps the PATH it started with, so a fresh
+/// `winget install Google.PlatformTools` isn't on it yet.
+fn adb_candidates(
+    tpl_adb: Option<std::ffi::OsString>,
+    bundled: Option<&Path>,
+    local_appdata: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let mut c: Vec<PathBuf> = Vec::new();
+    if let Some(p) = tpl_adb.filter(|p| !p.is_empty()) {
+        c.push(p.into());
+    }
+    if let Some(b) = bundled {
+        c.push(b.join("adb.exe"));
+    }
+    if let Some(local) = local_appdata {
+        // scrcpy keeps adb in its versioned folder, platform-tools in `platform-tools\`: look one level down.
+        if let Ok(dirs) = std::fs::read_dir(local.join("Microsoft/WinGet/Packages")) {
+            let mut pkgs: Vec<PathBuf> = dirs
+                .flatten()
+                .filter(|d| {
+                    let n = d.file_name().to_string_lossy().into_owned();
+                    n.starts_with("Genymobile.scrcpy") || n.starts_with("Google.PlatformTools")
+                })
+                .map(|d| d.path())
+                .collect();
+            pkgs.sort();
+            for pkg in pkgs {
+                c.push(pkg.join("adb.exe"));
+                if let Ok(inner) = std::fs::read_dir(&pkg) {
+                    let mut inner: Vec<PathBuf> = inner.flatten().map(|i| i.path().join("adb.exe")).collect();
+                    inner.sort();
+                    c.extend(inner);
+                }
+            }
+        }
+        c.push(local.join("Microsoft/WinGet/Links/adb.exe"));
+        c.push(local.join("Android/Sdk/platform-tools/adb.exe"));
+    }
+    if let Some(path) = path {
+        c.extend(std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).map(|d| d.join("adb.exe")));
+    }
+    c
+}
+
 pub struct Adb {
     exe: PathBuf,
 }
 
 impl Adb {
-    /// adb from (in order) TPL_ADB, the app's bundled copy, scrcpy's winget install, then PATH.
+    /// adb from the first of [`adb_candidates`] that exists, or `None` when there is none: that is what makes the
+    /// "adb isn't installed" hint show. It is looked up again every few seconds until found, so adb installed
+    /// while Sidemic runs is picked up without a restart.
     pub fn find(bundled: Option<&Path>) -> Option<Adb> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Ok(p) = std::env::var("TPL_ADB") {
-            candidates.push(p.into());
-        }
-        if let Some(b) = bundled {
-            candidates.push(b.join("adb.exe"));
-        }
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let winget = Path::new(&local).join("Microsoft/WinGet/Packages");
-            if let Ok(dirs) = std::fs::read_dir(&winget) {
-                for d in dirs.flatten() {
-                    if d.file_name().to_string_lossy().starts_with("Genymobile.scrcpy") {
-                        if let Ok(inner) = std::fs::read_dir(d.path()) {
-                            for i in inner.flatten() {
-                                candidates.push(i.path().join("adb.exe"));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        candidates.push("adb.exe".into());
-        candidates
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let path = std::env::var_os("PATH");
+        adb_candidates(std::env::var_os("TPL_ADB"), bundled, local.as_deref(), path.as_deref())
             .into_iter()
-            .find(|p| p.is_file() || p.as_os_str() == "adb.exe")
+            .find(|p| p.is_file())
             .map(|exe| Adb { exe })
     }
 
@@ -488,6 +517,68 @@ fn server_args(strength: Strength, env: impl Fn(&str) -> Option<String>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch LOCALAPPDATA and PATH folder, removed on drop.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let d = std::env::temp_dir().join(format!("sidemic-adb-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Scratch(d)
+        }
+        fn file(&self, rel: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"").unwrap();
+            p
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn first(c: Vec<PathBuf>) -> Option<PathBuf> {
+        c.into_iter().find(|p| p.is_file())
+    }
+
+    #[test]
+    fn no_adb_anywhere_finds_nothing() {
+        // Before, a bare "adb.exe" always matched, so the "adb isn't installed" hint could never show.
+        let s = Scratch::new("none");
+        let path = std::env::join_paths([s.0.join("bin"), s.0.join("tools")]).unwrap();
+        assert_eq!(first(adb_candidates(None, None, Some(&s.0), Some(&path))), None);
+        assert_eq!(first(adb_candidates(None, None, None, None)), None);
+    }
+
+    #[test]
+    fn adb_is_found_on_path_and_in_winget_and_sdk_folders() {
+        let s = Scratch::new("found");
+        let on_path = s.file("bin/adb.exe");
+        let path = std::env::join_paths([s.0.join("empty"), s.0.join("bin")]).unwrap();
+        assert_eq!(first(adb_candidates(None, None, None, Some(&path))), Some(on_path.clone()));
+
+        // Android Studio's SDK beats PATH; winget's links folder beats the SDK.
+        let local = s.0.join("local");
+        let sdk = s.file("local/Android/Sdk/platform-tools/adb.exe");
+        assert_eq!(first(adb_candidates(None, None, Some(&local), Some(&path))), Some(sdk));
+        let link = s.file("local/Microsoft/WinGet/Links/adb.exe");
+        assert_eq!(first(adb_candidates(None, None, Some(&local), Some(&path))), Some(link));
+
+        // winget's platform-tools package (adb one level down) beats those; scrcpy's package beats that.
+        let tools = s.file("local/Microsoft/WinGet/Packages/Google.PlatformTools_x/platform-tools/adb.exe");
+        assert_eq!(first(adb_candidates(None, None, Some(&local), Some(&path))), Some(tools));
+        let scrcpy = s.file("local/Microsoft/WinGet/Packages/Genymobile.scrcpy_x/scrcpy-win64-v3.3/adb.exe");
+        assert_eq!(first(adb_candidates(None, None, Some(&local), Some(&path))), Some(scrcpy));
+
+        // TPL_ADB wins when it exists, and is skipped when it doesn't.
+        let own = s.file("own/adb.exe");
+        assert_eq!(first(adb_candidates(Some(own.clone().into()), None, Some(&local), None)), Some(own));
+        let gone = s.0.join("gone/adb.exe");
+        assert_eq!(first(adb_candidates(Some(gone.into()), None, None, Some(&path))), Some(on_path));
+    }
 
     #[test]
     fn reads_the_port_adb_chose() {

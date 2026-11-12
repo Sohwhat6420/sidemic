@@ -8,7 +8,7 @@
 
 [![test](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml/badge.svg)](https://github.com/Sohwhat6420/sidemic/actions/workflows/test.yml)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-pre--release-orange)](#roadmap)
+[![Release](https://img.shields.io/github/v/release/Sohwhat6420/sidemic)](https://github.com/Sohwhat6420/sidemic/releases/latest)
 
 <img src="docs/assets/hero.png" alt="The Sidemic window and tray flyout on Windows 11" width="100%">
 
@@ -29,8 +29,12 @@
 
 ## Quick start
 
-Windows 11 and Android 12 or later. The installer comes with the v0.1.0 pre-release; until then, build from source.
-Smart auto, the part that decides when the mic goes live, runs without a phone:
+Windows 11 and Android 12 or later. Download `Sidemic_<version>_x64-setup.exe` from the
+[latest release](https://github.com/Sohwhat6420/sidemic/releases/latest), check it against the SHA-256 on that page
+(the installer isn't code-signed yet, so SmartScreen warns: choose **More info**, then **Run anyway**), and follow
+[Getting started](#getting-started).
+
+To look at the code first: Smart auto, the part that decides when the mic goes live, runs without a phone:
 
 ```bash
 git clone https://github.com/Sohwhat6420/sidemic && cd sidemic
@@ -156,8 +160,9 @@ flowchart LR
 ## Getting started
 
 > [!NOTE]
-> Sidemic has been installed on the author's own laptop, with their phone, since 27 Oct 2026. There's no public installer
-> yet; until v1 you [build it from source](#build-from-source).
+> Sidemic has run on the author's own laptop, with their phone, since 27 Oct 2026, and has been tried on two phones
+> and one laptop. The installer is on the [Releases](https://github.com/Sohwhat6420/sidemic/releases/latest) page;
+> CI builds it from a clean checkout. You can also [build it from source](#build-from-source).
 
 ### Requirements
 - **Windows 11** with Bluetooth (for phone audio on the PC speakers).
@@ -208,7 +213,7 @@ Notes from the POCO test (17 Oct 2026):
 
 > [!IMPORTANT]
 > Right now **wireless debugging is the only way the PC reaches the phone.** That's what lets it run with no
-> phone app, but it means Developer options. An optional companion app that needs neither is planned for v1
+> phone app, but it means Developer options. An optional companion app that needs neither is planned after 1.0
 > (see the [roadmap](#roadmap)); the no-install route will stay.
 
 > [!CAUTION]
@@ -224,6 +229,7 @@ Notes from the POCO test (17 Oct 2026):
 | *Tap Wireless debugging on your phone* | The phone restarted or changed Wi-Fi, which switches wireless debugging off. Tap the tile. |
 | *Allow this laptop on your phone* | Accept the prompt on the phone and tick **Always allow on this network**. Mesh Wi-Fi asks once per access point. |
 | *adb isn't installed* | Install platform-tools or scrcpy (see [Requirements](#requirements)), or point `TPL_ADB` at `adb.exe`. |
+| *VB-CABLE isn't available* | Install [VB-CABLE](https://vb-audio.com/Cable/) and restart the PC, or turn **CABLE Input** back on in Sound settings. Until then apps hear nothing. |
 | *Couldn't start on the phone* | It retries by itself. If it keeps failing, the log says why. |
 | *The phone refused play/pause* (Connection page; also volume changes or reading what's playing) | Turn on the switch it names. On Xiaomi, Redmi and POCO that's **USB debugging (Security settings)**. |
 | *Also reachable over wireless debugging: Use this phone* (Connection page) | More than one phone has wireless debugging on. The app keeps the phone it used before; click **Use this phone** to switch. |
@@ -316,7 +322,10 @@ and fixed, one API call at a time.
 - **Wireless debugging is the only link**, so the phone needs Developer options and one tap on the tile after
   each restart (see the caution above).
 - **Tested on two phones and one laptop.** Other phones are listed as untested in the compatibility table.
-- **No signed installer yet.**
+- **The phone's two sockets aren't authenticated yet.** While the phone server runs, any program on the PC can
+  connect to its forwarded ports, and connecting to the mic port starts the phone mic. See
+  [SECURITY.md](SECURITY.md) for what that means and what to do on a shared PC.
+- **The installer isn't code-signed yet**, so check its SHA-256 against the release page.
 
 ## Roadmap
 
@@ -326,12 +335,14 @@ and fixed, one API call at a time.
 - [x] Tray flyout and full window, Windows accent and phone wallpaper
 - [x] Pause / Resume, and recovery if the window ever stops responding
 - [x] Installed on the author's laptop (since 27 Oct 2026)
+- [x] First public release (1.0): installer and phone files built by CI from a clean checkout, with a SHA-256
 - [ ] Home-screen control panel on the phone (a web app, nothing to install)
-- [ ] **Optional companion app** for v1: no Developer options, no tap after a phone restart, and a Quick
+- [ ] **Optional companion app** (after 1.0): no Developer options, no tap after a phone restart, and a Quick
       Settings tile
 - [ ] Bluetooth-tethering fallback when the phone's Wi-Fi is off
 - [ ] Reverse audio (PC sound to the phone or earbuds)
-- [ ] Signed installer and first public release
+- [ ] A per-session secret on the phone's mic and control sockets
+- [ ] Code-signed installer
 
 ## Build from source
 

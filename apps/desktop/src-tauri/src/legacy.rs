@@ -3,8 +3,9 @@
 //! and keep a dead install folder. At the first start this removes the old "TRUE Phone Link" Run value and the files
 //! of the old install folder (best effort). The data folder `%APPDATA%\com.truephonelink.desktop` keeps its name
 //! (the identifier is not user-visible), so settings, `phone.json` and logs carry over untouched. The restart
-//! watcher's own Run value is swapped by `tools/install-watcher.ps1`, not here: while the old watcher is still
-//! registered the old folder is left alone, because that watcher restarts the app from it.
+//! watcher's own Run value is swapped by the watcher's installer (a script on the author's machine, not in this
+//! repository), not here: while the old watcher is still registered the old folder is left alone, because that
+//! watcher restarts the app from it.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};

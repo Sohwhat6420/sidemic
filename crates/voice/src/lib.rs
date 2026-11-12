@@ -1,4 +1,4 @@
-//! TRUE Phone Link voice chain. Mono f32 in [-1, 1] at 48 kHz, processed in 10 ms blocks (480 samples).
+//! Sidemic's voice chain. Mono f32 in [-1, 1] at 48 kHz, processed in 10 ms blocks (480 samples).
 //!
 //! ```text
 //! high-pass 90 Hz -> noise suppression -> presence peak 3 kHz -> speech leveller + expander -> look-ahead limiter

@@ -1,9 +1,10 @@
 [package]
 name = "tpl-desktop"
-version = "0.1.0"
+version = "1.0.0"
 description = "Sidemic: your phone as the laptop's microphone and speaker source"
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "true-phone-link"

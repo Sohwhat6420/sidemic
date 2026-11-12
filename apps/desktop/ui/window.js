@@ -39,7 +39,8 @@ start((s) => {
   document.querySelectorAll('[data-setting="audio_mode"]').forEach((el) => (el.value = s.audio.mode));
   document.querySelectorAll('[data-setting="voice_cleaning"]').forEach((el) => (el.value = s.voice_cleaning));
 
-  const micLine = s.mic.live === "off" ? "Nobody is using the mic" :
+  const micLine = s.mic.no_cable ? "VB-CABLE isn't available, so apps hear nothing. Install it from vb-audio.com/Cable" :
+    s.mic.live === "off" ? "Nobody is using the mic" :
     `${s.mic.live === "phone" ? "Phone mic, cleaned on the phone" : "Laptop mic"}${s.mic.app ? " · " + esc(s.mic.app) + " is listening" : ""}`;
   $("home-mic").innerHTML = micLine;
   const audioLine = s.audio.playing

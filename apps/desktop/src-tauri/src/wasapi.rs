@@ -46,6 +46,22 @@ pub fn find(flow: EDataFlow, pred: impl Fn(&str) -> bool) -> Result<(IMMDevice, 
     Err(E_FAIL.into())
 }
 
+/// Windows' default endpoint for `flow` (the one Sound settings calls the default device) when its name passes
+/// `pred`, otherwise the first active one that does. Without this the laptop-mic fallback took whichever capture
+/// device Windows listed first, which can be a virtual mic or Stereo Mix rather than the user's own microphone.
+pub fn find_default_first(flow: EDataFlow, pred: impl Fn(&str) -> bool) -> Result<(IMMDevice, String)> {
+    unsafe {
+        if let Ok(d) = enumerator()?.GetDefaultAudioEndpoint(flow, eConsole) {
+            if let Ok(name) = friendly_name(&d) {
+                if pred(&name) {
+                    return Ok((d, name));
+                }
+            }
+        }
+    }
+    find(flow, pred)
+}
+
 pub fn default_render() -> Result<(IMMDevice, String)> {
     unsafe {
         let d = enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole)?;

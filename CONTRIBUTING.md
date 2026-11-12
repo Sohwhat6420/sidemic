@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for looking. Sidemic is pre-release and tested on two phones and one laptop, so reports from other
-phones are the most useful thing you can send.
+Thanks for looking. Sidemic has been tested on two phones and one laptop, so reports from other phones are the
+most useful thing you can send.
 
 ## Reporting a phone
 
@@ -15,15 +15,32 @@ with placeholders first.
 
 ## Running the tests
 
-These need no phone and no Android SDK (Windows, Rust stable):
+These need no phone and no Android SDK (Rust stable). On Windows:
 
 ```bash
 mkdir -p phone-server/out && touch phone-server/out/tpl-server.jar phone-server/out/libtpl_voice_jni.so
-cargo test -p tpl-policy -p tpl-desktop     # what CI runs on every push
+cargo test -p tpl-policy -p tpl-desktop     # Smart auto and the desktop's unit tests
 ```
 
 The first line puts empty stand-ins where the Tauri build script expects the phone files; the tests don't use
-them. Building the real app needs the full toolchain under "Build from source" in the README.
+them. On Linux too (the desktop crate is Windows-only; these two aren't):
+
+```bash
+cargo test -p tpl-policy -p tpl-voice
+cargo test --release -p tpl-voice -- --include-ignored   # DeepFilterNet only builds its graph in release
+```
+
+CI runs all of these on every push and pull request (`.github/workflows/test.yml`), and `build.yml` builds the
+phone server, the phone's voice chain and the Windows installer from a clean checkout. Building the real app
+yourself needs the full toolchain under "Build from source" in the README.
+
+## Releasing
+
+1. Bump `version` in `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/src-tauri/tauri.conf.json`, and move
+   the CHANGELOG's Unreleased notes under a new `## [x.y.z] - date` heading. CI fails if the three disagree.
+2. Merge, then tag the merge commit `vx.y.z` and push the tag.
+3. `build.yml` opens a **draft** release with the installer, its SHA-256 and that version's CHANGELOG section.
+   Read it, try the installer, and publish it by hand.
 
 ## Pull requests
 

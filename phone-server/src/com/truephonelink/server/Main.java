@@ -309,6 +309,12 @@ public final class Main {
                 }
             } catch (IOException e) {
                 Log.i("client gone (" + e.getMessage() + "); mic stopped");
+            } catch (RuntimeException e) {
+                // The phone refused the mic (no source opens, a SecurityException, the voice chain didn't load).
+                // Uncaught, this would end the mic thread and, under app_process, the whole server, control channel
+                // included; the laptop would restart it, ask for the mic again and crash it again. Closing this
+                // client instead lets the laptop fall back to its own mic and keep media and battery working.
+                Log.e("mic failed: " + e);
             } finally {
                 if (cap != null) {
                     cap.release();

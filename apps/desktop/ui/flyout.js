@@ -51,11 +51,15 @@ start((s) => {
   const lines = [];
   const line = (ic, text, muted, action) =>
     `<div class="line">${icon(ic)}<div class="txt">${text}<div class="muted">${muted}</div></div>${action || ""}</div>`;
+  if (s.mic.no_cable) {
+    lines.push(line("info_20_regular", "VB-CABLE isn't available",
+      "Apps hear nothing until it is. Install VB-CABLE from vb-audio.com/Cable, or turn CABLE Input back on in Sound settings"));
+  }
   if (s.paused) {
     lines.push(line("pause_20_regular", "Paused",
       "Your laptop mic is used, phone audio stays on the phone, and nothing moves by itself",
       `<span class="link" data-act="toggle_pause">Resume</span>`));
-  } else if (s.connected && s.mic.live === "off" && !s.audio.playing) {
+  } else if (s.connected && s.mic.live === "off" && !s.audio.playing && !s.mic.no_cable) {
     lines.push(line("checkmark_circle_16_filled", "Ready, nothing to do",
       s.smart_auto
         ? "The phone mic turns on when an app listens. Phone media moves to the speaker while the laptop is quiet."
