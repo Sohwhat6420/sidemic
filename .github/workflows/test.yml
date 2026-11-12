@@ -1,7 +1,10 @@
 name: test
 on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   test:
+    name: Smart auto and desktop (Windows)
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -15,3 +18,17 @@ jobs:
         run: mkdir -p phone-server/out && touch phone-server/out/tpl-server.jar phone-server/out/libtpl_voice_jni.so
       - name: Smart auto scenarios and desktop unit tests
         run: cargo test -p tpl-policy -p tpl-desktop
+
+  voice:
+    name: Voice chain (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Voice chain unit tests
+        run: cargo test -p tpl-voice
+      # tract only builds the DeepFilterNet graph in release, so the strength test is #[ignore]d in debug.
+      - name: DeepFilterNet strength test (release)
+        run: cargo test --release -p tpl-voice -- --include-ignored

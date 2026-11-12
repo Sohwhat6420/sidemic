@@ -1,0 +1,144 @@
+name: build
+# Builds what the installer ships, from a clean checkout: the phone server (dex jar), the phone's voice chain
+# (arm64 .so) and the Windows installer. On a version tag it also opens a DRAFT release with the installer and its
+# SHA-256 attached; a maintainer reads it and publishes it by hand. Nothing here publishes anything.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  versions:
+    name: Versions agree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo, Tauri, CHANGELOG (and the tag, on a tag push)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_v=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/desktop/src-tauri/Cargo.toml | head -1)
+          tauri_v=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          log_v=$(grep -m1 -oP '^## \[\K[0-9]+\.[0-9]+\.[0-9]+(?=\])' CHANGELOG.md)
+          echo "Cargo.toml $cargo_v, tauri.conf.json $tauri_v, CHANGELOG $log_v"
+          [ "$cargo_v" = "$tauri_v" ] || { echo "::error::Cargo.toml ($cargo_v) and tauri.conf.json ($tauri_v) differ"; exit 1; }
+          [ "$cargo_v" = "$log_v" ] || { echo "::error::the newest CHANGELOG release ($log_v) is not $cargo_v"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            [ "${GITHUB_REF_NAME#v}" = "$cargo_v" ] || { echo "::error::tag $GITHUB_REF_NAME does not match $cargo_v"; exit 1; }
+          fi
+
+  phone:
+    name: Phone server and voice chain (Android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      # The runner image ships the Android SDK and an NDK; add the exact platform and build tools build.sh asks for.
+      - name: Android platform 36 and build-tools 36.0.0
+        shell: bash
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      - name: Phone server (javac + d8)
+        run: bash phone-server/build.sh
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Voice chain for the phone (arm64-v8a)
+        shell: bash
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a build --release -p tpl-voice-jni
+          cp target/aarch64-linux-android/release/libtpl_voice_jni.so phone-server/out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone
+          path: |
+            phone-server/out/tpl-server.jar
+            phone-server/out/libtpl_voice_jni.so
+          if-no-files-found: error
+
+  installer:
+    name: Windows installer
+    needs: [versions, phone]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installer
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          name: phone
+          path: phone-server/out
+      - name: Build the NSIS installer
+        working-directory: apps/desktop
+        run: npx --yes @tauri-apps/cli@2 build
+      - name: SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/release/bundle/nsis
+          ls -l
+          sha256sum *-setup.exe | tee SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/SHA256SUMS.txt
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft release (tags only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: dist
+      - name: Draft the release from the CHANGELOG
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          # This version's CHANGELOG section, without its heading, then the checksum.
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## / {exit} on && /^\[.*\]: / {exit} on' CHANGELOG.md > notes.md
+          { echo; echo "### SHA-256"; echo; echo '```'; cat dist/SHA256SUMS.txt; echo '```'; } >> notes.md
+          if is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> /dev/null); then
+            if [ "$is_draft" = "true" ]; then
+              echo "A draft release for $GITHUB_REF_NAME exists; replacing its files, leaving its notes."
+              gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            else
+              echo "::warning::$GITHUB_REF_NAME is already published; not touching it. The installer is in this run's artefacts."
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "Sidemic $v" --notes-file notes.md
+          fi
