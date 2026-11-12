@@ -36,6 +36,8 @@ pub struct MicStatus {
     pub phone_failed: AtomicBool,
     /// Mic delay through the cable in milliseconds (our buffering; the phone adds its own 32 ms).
     pub delay_ms: AtomicU32,
+    /// Set while VB-CABLE's "CABLE Input" can't be opened (not installed, or disabled): apps hear nothing.
+    pub no_cable: AtomicBool,
 }
 
 pub fn spawn(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
@@ -44,6 +46,12 @@ pub fn spawn(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>
         .spawn(move || run(rx, status, events))
         .expect("mic thread");
 }
+
+/// How long to wait before looking for the laptop mic again after it couldn't be opened or stopped working.
+/// Looking costs 1-2.5 ms (see wasapi.rs), so it mustn't happen on every 5 ms pass on a PC with no mic.
+const LAPTOP_RETRY: Duration = Duration::from_secs(2);
+/// How long to wait before reconnecting to the phone after its stream dropped (the phone may be refusing the mic).
+const PHONE_RETRY: Duration = Duration::from_secs(1);
 
 const TARGET: usize = (RATE / 1000 * 40) as usize; // keep at least ~40 ms queued
 const MAX_TARGET: usize = (RATE / 1000 * 300) as usize; // never more than 300 ms, however late the Wi-Fi
@@ -202,6 +210,7 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
     let mut phone: Option<PhoneStream> = None;
     let mut laptop: Option<Capture> = None;
     let mut retry_phone_at = Instant::now();
+    let mut retry_laptop_at = Instant::now();
     let mut started = false;
     let mut block: Vec<f32> = Vec::with_capacity(RATE as usize / 10);
     let mut spare: Vec<f32> = Vec::new();
@@ -253,8 +262,12 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
                 continue;
             }
             match wasapi::find(eRender, |n| n.contains("CABLE Input")).and_then(|(d, _)| Render::open(&d)) {
-                Ok(r) => cable = Some(r),
+                Ok(r) => {
+                    cable = Some(r);
+                    status.no_cable.store(false, Ordering::Relaxed);
+                }
                 Err(e) => {
+                    status.no_cable.store(true, Ordering::Relaxed);
                     let _ = events.send(format!("mic: CABLE Input not available ({e})"));
                     thread::sleep(Duration::from_secs(2));
                     continue;
@@ -266,6 +279,7 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
         if want == Route::Phone {
             if phone.as_ref().is_some_and(|p| !p.alive.load(Ordering::SeqCst)) {
                 phone = None;
+                retry_phone_at = Instant::now() + PHONE_RETRY;
                 status.phone_failed.store(true, Ordering::Relaxed);
                 let _ = events.send("mic: phone stream dropped; laptop mic until it's back".into());
             }
@@ -291,9 +305,12 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
             status.phone_failed.store(false, Ordering::Relaxed);
         }
         let use_laptop = want == Route::Laptop || !phone_live;
-        if use_laptop && laptop.is_none() {
+        if use_laptop && laptop.is_none() && Instant::now() >= retry_laptop_at {
             // The laptop's own mic: any capture device that isn't the cable itself.
             laptop = wasapi::find(eCapture, |n| !n.contains("CABLE")).and_then(|(d, _)| Capture::open(&d)).ok();
+            if laptop.is_none() {
+                retry_laptop_at = Instant::now() + LAPTOP_RETRY;
+            }
         } else if !use_laptop && laptop.is_some() {
             laptop = None;
         }
@@ -304,8 +321,14 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
         let need = TARGET.saturating_sub(queued).min(cable_ref.free() as usize);
         block.clear();
         if use_laptop {
-            if let Some(c) = laptop.as_ref() {
-                let _ = c.read(&mut spare);
+            // A headset unplugged mid-call fails every read from then on: drop it and look for a mic again.
+            if let Some(Err(e)) = laptop.as_ref().map(|c| c.read(&mut spare)) {
+                let _ = events.send(format!("mic: the laptop mic stopped ({e}); looking for one again"));
+                laptop = None;
+                spare.clear();
+                retry_laptop_at = Instant::now() + LAPTOP_RETRY;
+            }
+            if laptop.is_some() {
                 if spare.len() > TARGET * 5 {
                     let drop = spare.len() - TARGET;
                     spare.drain(..drop);

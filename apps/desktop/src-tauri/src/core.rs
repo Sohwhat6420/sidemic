@@ -877,6 +877,7 @@ impl Core {
             "mic": {
                 "mode": st.mic_mode, "live": live, "app": st.mic_users.first().map(|a| friendly_name(a)),
                 "level_db": level_db, "delay_ms": self.mic.delay_ms.load(Ordering::Relaxed) + phone_ms, "why": mic_why,
+                "no_cable": self.mic.no_cable.load(Ordering::Relaxed),
             },
             "audio": {
                 "mode": st.audio_mode, "on_speaker": st.phone_audio == Placement::Speaker, "available": st.a2dp_available,

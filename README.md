@@ -224,6 +224,7 @@ Notes from the POCO test (17 Oct 2026):
 | *Tap Wireless debugging on your phone* | The phone restarted or changed Wi-Fi, which switches wireless debugging off. Tap the tile. |
 | *Allow this laptop on your phone* | Accept the prompt on the phone and tick **Always allow on this network**. Mesh Wi-Fi asks once per access point. |
 | *adb isn't installed* | Install platform-tools or scrcpy (see [Requirements](#requirements)), or point `TPL_ADB` at `adb.exe`. |
+| *VB-CABLE isn't available* | Install [VB-CABLE](https://vb-audio.com/Cable/) and restart the PC, or turn **CABLE Input** back on in Sound settings. Until then apps hear nothing. |
 | *Couldn't start on the phone* | It retries by itself. If it keeps failing, the log says why. |
 | *The phone refused play/pause* (Connection page; also volume changes or reading what's playing) | Turn on the switch it names. On Xiaomi, Redmi and POCO that's **USB debugging (Security settings)**. |
 | *Also reachable over wireless debugging: Use this phone* (Connection page) | More than one phone has wireless debugging on. The app keeps the phone it used before; click **Use this phone** to switch. |
