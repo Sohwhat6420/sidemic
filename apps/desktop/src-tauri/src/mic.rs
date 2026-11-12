@@ -306,8 +306,9 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
         }
         let use_laptop = want == Route::Laptop || !phone_live;
         if use_laptop && laptop.is_none() && Instant::now() >= retry_laptop_at {
-            // The laptop's own mic: any capture device that isn't the cable itself.
-            laptop = wasapi::find(eCapture, |n| !n.contains("CABLE")).and_then(|(d, _)| Capture::open(&d)).ok();
+            // The laptop's own mic: Windows' default one unless that is the cable itself, else any that isn't.
+            laptop =
+                wasapi::find_default_first(eCapture, |n| !n.contains("CABLE")).and_then(|(d, _)| Capture::open(&d)).ok();
             if laptop.is_none() {
                 retry_laptop_at = Instant::now() + LAPTOP_RETRY;
             }
