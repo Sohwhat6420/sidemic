@@ -1,4 +1,4 @@
-//! TRUE Phone Link "Smart auto" policy.
+//! Sidemic's "Smart auto" policy.
 //!
 //! The laptop app makes the phone the PC microphone over Wi-Fi and can route the phone's media audio to
 //! the laptop's default speaker over Bluetooth A2DP. This crate decides when. It is pure

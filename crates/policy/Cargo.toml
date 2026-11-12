@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "TRUE Phone Link \"Smart auto\" policy: a pure, deterministic engine that turns timestamped events into actions"
+description = "Sidemic \"Smart auto\" policy: a pure, deterministic engine that turns timestamped events into actions"
 
 [lib]
 name = "tpl_policy"

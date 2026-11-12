@@ -34,7 +34,8 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 const FLYOUT_WIDTH: f64 = 360.0;
 const AUTOSTART_ARG: &str = "--autostart";
-/// Written to the data dir when Quit is chosen from the tray, removed at start-up (see `tools/tpl-watch.pyw`).
+/// Written to the data dir when Quit is chosen from the tray, removed at start-up. An optional restart watcher (not
+/// in this repository) reads it.
 const QUIT_FLAG: &str = "quit.flag";
 
 /// WebView2's arguments for both windows (they share one browser process, so they must match): wry's defaults
@@ -474,7 +475,7 @@ fn main() {
                         }
                     }
                     "quit" => {
-                        // Tells the restart watcher (tools/tpl-watch.pyw) this stop is deliberate.
+                        // Tells an optional restart watcher (not in this repository) that this stop is deliberate.
                         if let Ok(d) = app.path().app_data_dir() {
                             let _ = std::fs::write(d.join(QUIT_FLAG), "quit from the tray");
                         }
