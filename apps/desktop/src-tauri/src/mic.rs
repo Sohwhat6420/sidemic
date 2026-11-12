@@ -52,6 +52,10 @@ pub fn spawn(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>
 const LAPTOP_RETRY: Duration = Duration::from_secs(2);
 /// How long to wait before reconnecting to the phone after its stream dropped (the phone may be refusing the mic).
 const PHONE_RETRY: Duration = Duration::from_secs(1);
+/// Once audio is flowing, this long with no bytes at all means the stream stalled (Wi-Fi gone before adb
+/// noticed): drop it so the laptop mic covers instead of silence. The phone sends continuously, silence included,
+/// and its screen-off bursts arrive about 190 ms apart, so 2 s is far outside normal.
+const PHONE_STALL: Duration = Duration::from_secs(2);
 
 const TARGET: usize = (RATE / 1000 * 40) as usize; // keep at least ~40 ms queued
 const MAX_TARGET: usize = (RATE / 1000 * 300) as usize; // never more than 300 ms, however late the Wi-Fi
@@ -144,10 +148,17 @@ impl PhoneStream {
             wasapi::com_init();
             let mut aec = echo::Supervised::spawn();
             let (mut samples, mut clean) = (Vec::new(), Vec::new());
+            let mut flowing = false;
             loop {
                 match s.read(&mut buf) {
+                    // A timeout (a stall, see PHONE_STALL) ends the stream like a close does.
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        // Not before the first audio: the phone may take a moment to start its voice chain.
+                        if !flowing {
+                            flowing = true;
+                            let _ = s.set_read_timeout(Some(PHONE_STALL));
+                        }
                         let target = jitter.arrived(Instant::now(), n / 2);
                         t.store(target, Ordering::Relaxed);
                         let mut bytes: Vec<u8> = carry.take().into_iter().collect();
