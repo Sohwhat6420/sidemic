@@ -178,6 +178,7 @@ final class Serve {
             String lastBattery = null;
             int lastVolume = -1;
             int lastWallpaper = Integer.MIN_VALUE;
+            boolean wallpaperOk = true;
             long tick = 0;
             try {
                 while (open) {
@@ -202,23 +203,33 @@ final class Serve {
                             lastBattery = b.toString();
                         }
                     }
-                    if (tick % 4 == 0) { // every 2 s; one or two binder calls while it stays the same
+                    if (tick % 4 == 0 && wallpaperOk) { // every 2 s; one or two binder calls while it stays the same
                         // A lock id of -1 means the lock screen shows the home wallpaper (no separate lock
                         // wallpaper: the default on HyperOS and stock Android), so watch and read that one.
-                        int which = WallpaperManager.FLAG_LOCK;
-                        int id = wm.getWallpaperId(which);
-                        if (id < 0) {
-                            which = WallpaperManager.FLAG_SYSTEM;
-                            id = wm.getWallpaperId(which);
-                        }
-                        int key = id * 4 + which;
-                        if (key != lastWallpaper) {
-                            lastWallpaper = key;
-                            byte[] jpeg = Wallpaper.jpeg(wm, which);
-                            if (jpeg != null) {
-                                send(new JSONObject().put("t", "wallpaper").put("id", id)
-                                        .put("jpeg", Base64.encodeToString(jpeg, Base64.NO_WRAP)));
+                        // A phone that won't hand over its wallpaper only loses the wallpaper: the battery, volume
+                        // and media updates in this loop carry on.
+                        try {
+                            int which = WallpaperManager.FLAG_LOCK;
+                            int id = wm.getWallpaperId(which);
+                            if (id < 0) {
+                                which = WallpaperManager.FLAG_SYSTEM;
+                                id = wm.getWallpaperId(which);
                             }
+                            int key = id * 4 + which;
+                            if (key != lastWallpaper) {
+                                lastWallpaper = key;
+                                byte[] jpeg = Wallpaper.jpeg(wm, which);
+                                if (jpeg != null) {
+                                    send(new JSONObject().put("t", "wallpaper").put("id", id)
+                                            .put("jpeg", Base64.encodeToString(jpeg, Base64.NO_WRAP)));
+                                }
+                            }
+                        } catch (RuntimeException | IOException e) {
+                            if (!open) {
+                                throw e; // the laptop went away mid-send: end the loop as before
+                            }
+                            Log.i("wallpaper unavailable, not asking again this session: " + e);
+                            wallpaperOk = false;
                         }
                     }
                     tick++;
