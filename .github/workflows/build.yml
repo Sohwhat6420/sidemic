@@ -53,7 +53,10 @@ jobs:
       # The runner image ships the Android SDK and an NDK; add the exact platform and build tools build.sh asks for.
       - name: Android platform 36 and build-tools 36.0.0
         shell: bash
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+        # `yes` dies of SIGPIPE when sdkmanager exits; `|| true` keeps pipefail from calling that a failure.
+        run: |
+          { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          ls "$ANDROID_HOME/platforms/android-36/android.jar" "$ANDROID_HOME/build-tools/36.0.0/d8"
       - name: Phone server (javac + d8)
         run: bash phone-server/build.sh
       - name: cargo-ndk
