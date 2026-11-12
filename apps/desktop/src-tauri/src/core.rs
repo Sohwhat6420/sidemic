@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -364,7 +364,7 @@ impl Core {
                         if self.known.get(&id) != Some(&n) {
                             self.known.insert(id, n);
                             if let Ok(s) = serde_json::to_string_pretty(&self.known) {
-                                let _ = fs::write(self.dir.join("phone-names.json"), s);
+                                let _ = save_file(&self.dir.join("phone-names.json"), s);
                             }
                         }
                     }
@@ -522,7 +522,7 @@ impl Core {
         }
         let memory_after = self.engine.memory().to_json();
         if memory_after != memory_before {
-            let _ = fs::write(self.dir.join("memory.json"), memory_after);
+            let _ = save_file(&self.dir.join("memory.json"), memory_after);
         }
     }
 
@@ -716,7 +716,7 @@ impl Core {
             "forget_rule" => {
                 if let Some(id) = arg.and_then(|a| a.parse().ok()) {
                     self.engine.memory_mut().delete_rule(id);
-                    let _ = fs::write(self.dir.join("memory.json"), self.engine.memory().to_json());
+                    let _ = save_file(&self.dir.join("memory.json"), self.engine.memory().to_json());
                 }
             }
             "toggle_autostart" => {
@@ -748,7 +748,7 @@ impl Core {
 
     fn save_settings(&self) {
         if let Ok(s) = serde_json::to_string_pretty(&self.settings) {
-            let _ = fs::write(self.dir.join("settings.json"), s);
+            let _ = save_file(&self.dir.join("settings.json"), s);
         }
     }
 
@@ -1022,6 +1022,21 @@ static PICK: Mutex<Option<String>> = Mutex::new(None);
 /// The auto-switch setting, mirrored here for the adb thread.
 static AUTO_SWITCH: AtomicBool = AtomicBool::new(false);
 
+/// Writes a settings-style file whole or not at all: to `<name>.tmp`, flushed, then renamed over the old one.
+/// A crash or power cut mid-write used to leave a torn file, which the next start read as "no file" and reset:
+/// learned rules gone, and autostart switched back on.
+fn save_file(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(contents.as_ref())?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, path)
+}
+
 /// Set when "Voice cleaning" changes: the phone server reads its chain settings at start, so the adb thread
 /// restarts it (the phone mic drops for a few seconds).
 static RESTART_SERVER: AtomicBool = AtomicBool::new(false);
@@ -1046,7 +1061,7 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
     let mut mine: Remembered = fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let save = |m: &Remembered| {
         if let Ok(s) = serde_json::to_string_pretty(m) {
-            let _ = fs::write(&file, s);
+            let _ = save_file(&file, s);
         }
     };
     if let Ok(p) = std::env::var("TPL_PHONE") {
@@ -1435,7 +1450,22 @@ fn diff(old: &mut BTreeSet<String>, new: BTreeSet<String>, tx: &Sender<Msg>, mk:
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_for, refusal_hint, Settings, Strength};
+    use super::{hint_for, refusal_hint, save_file, Settings, Strength};
+
+    #[test]
+    fn save_file_replaces_the_whole_file_and_leaves_no_temp() {
+        let d = std::env::temp_dir().join(format!("sidemic-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        save_file(&f, r#"{"a":1,"long":"first version, longer than the second"}"#).unwrap();
+        save_file(&f, r#"{"a":2}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), r#"{"a":2}"#);
+        assert!(!d.join("settings.json.tmp").exists());
+        // A folder that isn't there fails cleanly and creates nothing.
+        assert!(save_file(&d.join("missing").join("memory.json"), "{}").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn voice_cleaning_is_saved_and_old_settings_files_get_medium() {
