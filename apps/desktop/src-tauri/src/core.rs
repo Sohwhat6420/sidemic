@@ -777,7 +777,7 @@ impl Core {
         let st = self.engine.state();
         let connected = self.ctl.connected();
         let (hint, hint_long) = match &self.link {
-            Link::NoAdb => ("adb isn't installed".to_owned(), "Sidemic uses adb to reach the phone. Install scrcpy (it includes adb) with: winget install Genymobile.scrcpy".to_owned()),
+            Link::NoAdb => ("adb isn't installed".to_owned(), "Sidemic uses adb to reach the phone. Install Android platform-tools with: winget install Google.PlatformTools (or scrcpy, which includes adb: winget install Genymobile.scrcpy). Sidemic finds it within a few seconds.".to_owned()),
             Link::Missing => ("Tap Wireless debugging on your phone".to_owned(), "The phone isn't reachable over Wi-Fi. After a restart or a Wi-Fi change, the phone turns Wireless debugging off: swipe down and tap its tile in Quick settings. Both devices must be on the same Wi-Fi.".to_owned()),
             Link::Unauthorised => ("Allow this laptop on your phone".to_owned(), "The phone is asking whether to allow wireless debugging from this laptop on this network. Tap Allow, and tick Always allow on this network.".to_owned()),
             Link::Failed(e) => ("Couldn't start on the phone".to_owned(), format!("Starting Sidemic on the phone failed: {e}. It retries by itself.")),
@@ -1031,9 +1031,13 @@ const SWITCH_AFTER: Duration = Duration::from_secs(15);
 const ROSTER_EVERY: Duration = Duration::from_secs(8);
 
 fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone_dir: PathBuf, data_dir: PathBuf) {
-    let Some(adb) = Adb::find(None) else {
+    // Keep looking, so adb installed while Sidemic runs is picked up without a restart.
+    let adb = loop {
+        if let Some(adb) = Adb::find(None) {
+            break adb;
+        }
         let _ = tx.send(Msg::Link(Link::NoAdb));
-        return;
+        thread::sleep(Duration::from_secs(5));
     };
     adb.start_daemon();
     let adb = ADB.get_or_init(|| adb);
