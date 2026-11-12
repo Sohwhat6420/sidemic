@@ -60,7 +60,7 @@ const state = {
   connected: true, link_kind: "wifi", link_text: "Wi-Fi, wireless debugging", hint: "", hint_long: "", phone_warning: null,
   other_phones: [], phones: [{ id: "PHONE1", label: "Galaxy S24 Ultra", ready: true, active: true, chosen: true }],
   auto_switch: false, aec_delay_ms: 0, aec_fallback_silence: false,
-  device: { name: "Galaxy S24 Ultra" }, battery: 82, charging: false, volume: 0.55, wallpaper: WALL, ping_ms: 6, version: "0.1.0",
+  device: { name: "Galaxy S24 Ultra" }, battery: 82, charging: false, volume: 0.55, wallpaper: WALL, ping_ms: 6, version: "1.0.0",
   autostart: true, smart_auto: true, paused: false,
   mic: { mode: "auto", live: "phone", app: "Discord", level_db: -21, delay_ms: 118, why: "" },
   audio: { mode: "auto", on_speaker: false, available: true, playing: null, why: "", speaker: "PC speakers", speaker_short: "PC speakers" },
