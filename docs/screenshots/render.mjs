@@ -4,6 +4,8 @@
 //   node docs/screenshots/render.mjs        writes docs/assets/{hero,flyout,page-*}.png
 //
 // Uses Playwright's bundled Chromium, headless (npx playwright install chromium), never an installed browser.
+// CHROME=<path to chrome> picks a specific one; SHOTS_OUT=<dir> writes the images there instead of docs/assets.
+// The committed images were rendered on Windows; elsewhere Segoe UI is missing, so the text looks different.
 import { cpSync, readFileSync, writeFileSync, mkdtempSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -13,19 +15,35 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const ui = join(here, "../../apps/desktop/ui");
 const assets = join(here, "../assets");
+const out = process.env.SHOTS_OUT || assets;
 const work = mkdtempSync(join(tmpdir(), "sidemic-shots-"));
 cpSync(ui, work, { recursive: true });
 
 function findChromium() {
-  const roots = [process.env.PLAYWRIGHT_BROWSERS_PATH, join(process.env.LOCALAPPDATA || "", "ms-playwright")].filter(Boolean);
+  if (process.env.CHROME) return process.env.CHROME;
+  const home = process.env.HOME || "";
+  const roots = [
+    process.env.PLAYWRIGHT_BROWSERS_PATH,
+    join(process.env.LOCALAPPDATA || "", "ms-playwright"), // Windows
+    join(home, ".cache", "ms-playwright"), // Linux
+    join(home, "Library", "Caches", "ms-playwright"), // macOS
+  ].filter(Boolean);
+  const exes = [
+    ["chrome-win64", "chrome.exe"],
+    ["chrome-linux64", "chrome"],
+    ["chrome-linux", "chrome"],
+    ["chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"],
+  ];
   for (const root of roots) {
     if (!existsSync(root)) continue;
     for (const d of readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()) {
-      const exe = join(root, d, "chrome-win64", "chrome.exe");
-      if (existsSync(exe)) return exe;
+      for (const parts of exes) {
+        const exe = join(root, d, ...parts);
+        if (existsSync(exe)) return exe;
+      }
     }
   }
-  throw new Error("Playwright Chromium not found: run `npx playwright install chromium`");
+  throw new Error("Playwright Chromium not found: run `npx playwright install chromium`, or set CHROME");
 }
 const chrome = findChromium();
 
@@ -74,7 +92,9 @@ const frame = (src, w, h, title) => `<!doctype html><html><head><style>
 <iframe src="${src}"></iframe></div></body></html>`;
 
 function shoot(url, out, w, h) {
-  execFileSync(chrome, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
+  // Chromium refuses to run as root (containers, CI) without --no-sandbox; it only renders local files here.
+  const root = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
+  execFileSync(chrome, [...root, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
     "--default-background-color=00000000", `--window-size=${w},${h}`, `--screenshot=${out}`, "--virtual-time-budget=4000", url],
   { windowsHide: true, stdio: "ignore" });
   console.log(out);
@@ -84,7 +104,7 @@ const W = 1080, H = 760;
 for (const page of ["home", "microphone", "audio", "auto", "connection"]) {
   const f = join(work, `frame-${page}.html`);
   writeFileSync(f, frame(pathToFileURL(join(work, "window.html")) + `?page=${page}`, W, H, "Sidemic"));
-  shoot(pathToFileURL(f).href, join(assets, `page-${page}.png`), W + 2, H + 34);
+  shoot(pathToFileURL(f).href, join(out, `page-${page}.png`), W + 2, H + 34);
 }
 // The flyout is 360 px wide in the app (FLYOUT_WIDTH in main.rs); headless Chromium won't make a window that narrow,
 // so it is framed at its real width, top-left, and the capture is cropped to it.
@@ -92,7 +112,7 @@ const fly = join(work, "frame-flyout.html");
 writeFileSync(fly, `<!doctype html><html><head><style>html,body{margin:0;background:transparent}
   iframe{display:block;border:0;width:360px;height:492px;border-radius:8px;border:1px solid #3a3a3a;background:#202020}</style></head>
   <body><iframe src="${pathToFileURL(join(work, "flyout.html"))}"></iframe></body></html>`);
-shoot(pathToFileURL(fly).href, join(assets, "flyout.png"), 362, 494);
+shoot(pathToFileURL(fly).href, join(out, "flyout.png"), 362, 494);
 
 // Hero: the window with the flyout over its corner, on a dark gradient.
 const hero = join(work, "hero.html");
@@ -100,8 +120,8 @@ writeFileSync(hero, `<!doctype html><html><head><style>
   html,body{margin:0;width:1600px;height:900px;overflow:hidden;background:radial-gradient(120% 120% at 20% 10%,#1d3b66 0%,#0e1a2e 55%,#070c16 100%)}
   img{position:absolute}
 </style></head><body>
-<img src="${pathToFileURL(join(assets, "page-home.png"))}" style="left:80px;top:60px">
-<img src="${pathToFileURL(join(assets, "flyout.png"))}" style="left:1150px;top:340px;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.6)">
+<img src="${pathToFileURL(join(out, "page-home.png"))}" style="left:80px;top:60px">
+<img src="${pathToFileURL(join(out, "flyout.png"))}" style="left:1150px;top:340px;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.6)">
 </body></html>`);
-shoot(pathToFileURL(hero).href, join(assets, "hero.png"), 1600, 900);
+shoot(pathToFileURL(hero).href, join(out, "hero.png"), 1600, 900);
 rmSync(work, { recursive: true, force: true });
