@@ -178,6 +178,15 @@ public final class GateTest {
         expect(ok, "the right proof is accepted");
         expect(Arrays.equals(out.toByteArray(), join(ns, unhex(phoneMic))), "the phone sends Ns, then its proof");
 
+        // The two halves the Gate uses: verify sends only the challenge; confirm sends only the phone's proof.
+        out = new ByteArrayOutputStream();
+        byte[] theirs = Auth.verify(new ByteArrayInputStream(join(nc, unhex(pcMic))), out, key, Auth.MIC, ns, soon());
+        expect(theirs != null && Arrays.equals(theirs, nc), "verify returns the other end's nonce");
+        expect(Arrays.equals(out.toByteArray(), ns), "verify sends the challenge and nothing else");
+        out = new ByteArrayOutputStream();
+        Auth.confirm(out, key, Auth.MIC, ns, nc);
+        expect(Arrays.equals(out.toByteArray(), unhex(phoneMic)), "confirm sends the phone's proof and nothing else");
+
         // Wrong proofs: refused, and after its challenge the phone sends nothing at all.
         byte[] flipped = unhex(pcMic);
         flipped[31] ^= 1;

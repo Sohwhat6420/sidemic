@@ -66,7 +66,7 @@ fn hex_of(key: &Key) -> String {
 struct Phone {
     child: Child,
     port: u16,
-    /// Everything it has printed (the phone server's log goes to standard output).
+    /// Everything it has printed, on standard output and standard error: the desktop app writes both to its log.
     log: Arc<Mutex<String>>,
 }
 
@@ -77,7 +77,7 @@ impl Phone {
             .args(["serve", channel, &deadline_ms.to_string()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("java wasn't found in JAVA_HOME or on the PATH");
         // The pipe stays open in `child`, as it does in the desktop app.
@@ -90,6 +90,14 @@ impl Phone {
                 if let Some(port) = line.strip_prefix("port ") {
                     let _ = tx.send(port.trim().parse::<u16>().unwrap());
                 }
+                let mut log = kept.lock().unwrap();
+                log.push_str(&line);
+                log.push('\n');
+            }
+        });
+        let (err, kept) = (child.stderr.take().unwrap(), log.clone());
+        thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let mut log = kept.lock().unwrap();
                 log.push_str(&line);
                 log.push('\n');
@@ -164,6 +172,8 @@ fn a_connection_that_proves_the_key_gets_the_stream() {
     let phone = Phone::start(&key, "mic", 3000);
     let mut s = phone.connect();
     prove_tcp(&mut s, &key, Channel::Mic, PATIENCE).unwrap();
+    // The handshake's timeouts are gone again, so the stream that follows is read as it was before 1.0.1.
+    assert_eq!((s.read_timeout().unwrap(), s.write_timeout().unwrap()), (None, None));
     let mut stream = [0u8; STREAM.len()];
     s.read_exact(&mut stream).unwrap();
     assert_eq!(stream, STREAM);
@@ -283,7 +293,22 @@ fn a_recorded_proof_is_refused_on_a_new_connection() {
 }
 
 #[test]
-fn silent_connections_do_not_lock_the_laptop_out() {
+fn the_deadline_is_only_for_proving_the_key() {
+    let key = Key::generate().unwrap();
+    let phone = Phone::start(&key, "mic", 1000);
+    let mut s = phone.connect();
+    prove_tcp(&mut s, &key, Channel::Mic, PATIENCE).unwrap();
+    let mut stream = [0u8; STREAM.len()];
+    s.read_exact(&mut stream).unwrap();
+    // Well past the 1 s deadline, a proven connection is still open: nothing more to read, but not closed.
+    thread::sleep(Duration::from_millis(2500));
+    s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let e = s.read(&mut stream).expect_err("a proven connection was closed at the handshake deadline");
+    assert!(matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut), "{e}");
+}
+
+#[test]
+fn silent_connections_that_came_first_do_not_keep_the_laptop_out() {
     let key = Key::generate().unwrap();
     // A long deadline, so that nothing here is closed by it.
     let phone = Phone::start(&key, "mic", 60_000);

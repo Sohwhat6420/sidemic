@@ -326,8 +326,18 @@ mod tests {
 
     #[test]
     fn a_dropped_key_is_wiped() {
-        let mut bytes = [0x5au8; KEY_LEN];
-        wipe(&mut bytes);
-        assert_eq!(bytes, [0u8; KEY_LEN]);
+        // Run the key's own destructor where it stands, then look at the bytes it leaves behind.
+        let mut key = std::mem::ManuallyDrop::new(Key::from_bytes([0x5a; KEY_LEN]));
+        let bytes: *const [u8; KEY_LEN] = &key.0;
+        // SAFETY: the key is dropped exactly once, here. Its only field is a plain byte array, which stays
+        // readable storage on this stack frame after the destructor has run.
+        let left = unsafe {
+            std::mem::ManuallyDrop::drop(&mut key);
+            std::ptr::read_volatile(bytes)
+        };
+        assert_eq!(left, [0u8; KEY_LEN]);
+        let mut line = [0x5au8; 65];
+        wipe(&mut line);
+        assert_eq!(line, [0u8; 65]);
     }
 }

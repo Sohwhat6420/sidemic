@@ -27,8 +27,10 @@ A security fix: the phone's mic and control sockets now ask for a per-session ke
 ### Changed
 - The phone server's `stream` and `serve` modes exit unless they are given a session key on standard input.
   To record by hand without the desktop app, use `mode=record`.
-- When the control socket doesn't complete the handshake three times in a row, the desktop restarts the phone
-  server. (Before, only a refused TCP connection counted.)
+- When the control socket hasn't completed the handshake after about 20 seconds of trying, the desktop restarts
+  the phone server and says so in the log. (Before, only a refused TCP connection led to a restart.)
+- Lines from the phone that go into the desktop's log have any run of 64 or more hex digits replaced, in case a
+  key is ever echoed back.
 
 ### Added
 - A `tpl-auth` crate with the PC's half of the handshake, and tests that run it against the phone's own Java

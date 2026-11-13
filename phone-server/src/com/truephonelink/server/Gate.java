@@ -11,9 +11,11 @@ import java.util.ArrayDeque;
  * it has proved the session key (see {@link Auth}). Everything else is closed without being served.
  *
  * Each connection proves itself on its own thread, so one that connects and says nothing can't hold up the laptop
- * behind it. At most {@link #MAX_UNPROVEN} are kept waiting at once; one more closes the oldest, so a crowd of
- * silent connections can't use up the phone's threads or lock the laptop out. Proven connections are served one at
- * a time, in turn, as they were before the handshake existed.
+ * behind it. At most {@link #MAX_UNPROVEN} are kept waiting at once; one more closes the oldest, so silent
+ * connections can't use up the phone's threads, and those already waiting can't keep the laptop out. (A program
+ * that keeps opening connections faster than the laptop's handshake takes can still get it closed; the laptop
+ * tries again, and no audio is lost to anyone.) Proven connections are served one at a time, in turn, as they
+ * were before the handshake existed.
  *
  * {@code C} is the connection type: android.net.LocalSocket on the phone ({@link LocalGate}), java.net.Socket in
  * GateTest. Nothing here uses android.* classes, so the test runs this same code.
@@ -83,10 +85,12 @@ abstract class Gate<C> {
 
     private void admit(C client) {
         try {
-            boolean proven = false;
+            byte[] ns = new byte[Auth.NONCE_LEN];
+            random.nextBytes(ns);
+            byte[] nc = null;
             boolean kept;
             try {
-                proven = prove(client);
+                nc = verify(client, ns);
             } finally {
                 // Leaving the waiting list is what makes a connection safe from being closed to make room. One
                 // that is no longer on it was closed while it proved itself, so it is not served either.
@@ -94,13 +98,18 @@ abstract class Gate<C> {
                     kept = unproven.remove(client);
                 }
             }
-            if (!proven || !kept) {
+            if (nc == null || !kept) {
                 refused();
                 return;
             }
+            // Only now, when nothing will close it to make room, is the other end told that it is in.
+            Auth.confirm(out(client), key, channel, ns, nc);
+            timeout(client, 0);
             synchronized (turn) {
                 serve(client);
             }
+        } catch (IOException e) {
+            // went away between proving the key and being told so
         } catch (Throwable t) {
             // Under app_process an uncaught exception on any thread ends the whole server.
             Log.e(channel + ": " + t);
@@ -109,19 +118,14 @@ abstract class Gate<C> {
         }
     }
 
-    private boolean prove(C client) {
+    /** The other end's nonce if it proved the key in time, else null. */
+    private byte[] verify(C client, byte[] ns) {
         try {
             timeout(client, deadlineMs);
-            byte[] ns = new byte[Auth.NONCE_LEN];
-            random.nextBytes(ns);
             long deadline = System.nanoTime() + deadlineMs * 1_000_000L;
-            if (!Auth.accept(in(client), out(client), key, channel, ns, deadline)) {
-                return false;
-            }
-            timeout(client, 0);
-            return true;
+            return Auth.verify(in(client), out(client), key, channel, ns, deadline);
         } catch (IOException e) {
-            return false; // went away, said nothing in time, or was closed to make room
+            return null; // went away, said nothing in time, or was closed to make room
         }
     }
 

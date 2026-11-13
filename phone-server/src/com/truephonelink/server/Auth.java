@@ -91,23 +91,37 @@ final class Auth {
     }
 
     /**
-     * Runs the phone's half on a new connection. Sends {@code ns}, reads the other end's nonce and proof (giving
-     * up at {@code deadlineNanos} on the System.nanoTime clock) and, only if the proof is right, sends the phone's
-     * own. Returns whether the other end proved the key; throws if it went away or ran out of time.
+     * The first two steps of the phone's half on a new connection: sends {@code ns}, then reads the other end's
+     * nonce and proof, giving up at {@code deadlineNanos} on the System.nanoTime clock. Returns the other end's
+     * nonce if its proof is right, or null if it is wrong; throws if the other end went away or ran out of time.
+     * Nothing is sent after {@code ns} here: the phone's own proof is {@link #confirm}.
+     *
+     * No flush anywhere in this class: these are socket streams with no buffer of their own, and on Android a
+     * LocalSocket's flush waits until the other end has read everything, which a silent connection never does.
      */
-    static boolean accept(InputStream in, OutputStream out, byte[] key, String channel, byte[] ns, long deadlineNanos)
+    static byte[] verify(InputStream in, OutputStream out, byte[] key, String channel, byte[] ns, long deadlineNanos)
             throws IOException {
         out.write(ns);
-        out.flush();
         byte[] reply = new byte[NONCE_LEN + MAC_LEN];
         readFully(in, reply, deadlineNanos);
         byte[] nc = Arrays.copyOfRange(reply, 0, NONCE_LEN);
         byte[] proof = Arrays.copyOfRange(reply, NONCE_LEN, reply.length);
-        if (!same(proof, mac(key, PC, channel, ns, nc))) {
+        return same(proof, mac(key, PC, channel, ns, nc)) ? nc : null;
+    }
+
+    /** The last step: the phone's own proof, for a connection whose proof {@link #verify} found right. */
+    static void confirm(OutputStream out, byte[] key, String channel, byte[] ns, byte[] nc) throws IOException {
+        out.write(mac(key, PHONE, channel, ns, nc));
+    }
+
+    /** {@link #verify} then, if the proof was right, {@link #confirm}. Returns whether it was right. */
+    static boolean accept(InputStream in, OutputStream out, byte[] key, String channel, byte[] ns, long deadlineNanos)
+            throws IOException {
+        byte[] nc = verify(in, out, key, channel, ns, deadlineNanos);
+        if (nc == null) {
             return false;
         }
-        out.write(mac(key, PHONE, channel, ns, nc));
-        out.flush();
+        confirm(out, key, channel, ns, nc);
         return true;
     }
 

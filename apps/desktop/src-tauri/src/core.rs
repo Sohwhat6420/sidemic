@@ -23,7 +23,7 @@ use tpl_voice::Strength;
 
 use crate::adb::{Adb, DeviceState};
 use crate::mic::{self, MicStatus, Route};
-use crate::phone::{PhoneControl, PhoneEvent};
+use crate::phone::{Connect, PhoneControl, PhoneEvent};
 use crate::{log, wasapi, winrt};
 
 /// Everything the brain hears about.
@@ -1045,6 +1045,9 @@ static RESTART_SERVER: AtomicBool = AtomicBool::new(false);
 const SWITCH_AFTER: Duration = Duration::from_secs(15);
 /// How often the phone list is refreshed while the phone is connected (each refresh is one `adb devices`).
 const ROSTER_EVERY: Duration = Duration::from_secs(8);
+/// Control connections in a row that may fail the session handshake before the phone server is restarted: about
+/// 20 s at one try every 2 s or so.
+const HANDSHAKE_TRIES: u32 = 8;
 
 fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone_dir: PathBuf, data_dir: PathBuf) {
     // Keep looking, so adb installed while Sidemic runs is picked up without a restart.
@@ -1069,6 +1072,8 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
     }
     let mut server: Option<(String, Child)> = None;
     let mut fails = 0;
+    // Control connections in a row that reached the port but didn't complete the session handshake.
+    let mut unproven = 0;
     let mut next_reconnect = Instant::now();
     // While the phone he picked (`mine.phone`) is missing and auto-switch is on, the link runs on this one instead.
     let mut stand_in: Option<String> = None;
@@ -1209,6 +1214,8 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                     if let Some((_, mut c)) = server.take() {
                         let _ = c.kill();
                     }
+                    crate::adb::end_session();
+                    unproven = 0;
                     let started = adb.ensure_files(&serial, &phone_dir).and_then(|_| adb.start_server(&serial));
                     match started {
                         Ok(c) => {
@@ -1224,11 +1231,27 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                         }
                     }
                 }
-                if ctl.connect(ptx.clone()) {
-                    fails = 0;
-                    let _ = tx.send(Msg::Link(Link::Ready));
-                } else {
-                    fails += 1;
+                match ctl.connect(ptx.clone()) {
+                    Connect::Ready => {
+                        fails = 0;
+                        unproven = 0;
+                        let _ = tx.send(Msg::Link(Link::Ready));
+                    }
+                    Connect::Unreachable => fails += 1,
+                    // The port answers (adb's forward always does) but the handshake didn't finish: the server is
+                    // most likely still starting, which is slow on some phones. Keep trying for about 20 s before
+                    // restarting it, so a slow start isn't cut short over and over.
+                    Connect::Unproven(why) => {
+                        unproven += 1;
+                        if unproven == 1 {
+                            log::line(format!("control: the phone hasn't completed the session handshake yet ({why})"));
+                        }
+                        if unproven >= HANDSHAKE_TRIES {
+                            log::line(format!("control: no session handshake after {unproven} tries; restarting the phone server"));
+                            unproven = 0;
+                            fails = 3;
+                        }
+                    }
                 }
             }
             DeviceState::Unauthorised(_) => {
@@ -1238,6 +1261,7 @@ fn adb_thread(tx: Sender<Msg>, ctl: PhoneControl, ptx: Sender<PhoneEvent>, phone
                 if let Some((_, mut c)) = server.take() {
                     let _ = c.kill();
                 }
+                crate::adb::end_session();
                 let _ = tx.send(Msg::Link(Link::Missing));
                 // adb's mDNS auto-connect can hold on to a stale instance (HyperOS re-advertises on a new port
                 // and keeps the old one), so every 15 s try the advertised addresses and the last one that worked.

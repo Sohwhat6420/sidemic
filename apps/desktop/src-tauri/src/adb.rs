@@ -32,9 +32,16 @@ pub fn ctl_port() -> u16 {
 }
 
 /// The key of the phone server now running, which every connection to its two sockets must prove (see the
-/// `tpl-auth` crate). A fresh one is made each time the server is started; it lives in memory only, and it is
-/// `None` while no server this app started is running, so nothing connects without one.
+/// `tpl-auth` crate). A fresh one is made each time the server is started and it lives in memory only. It is
+/// `None` until a server has been started, while one is being started, and once this app stops one or finds it
+/// gone ([`end_session`]), and nothing connects without one. A server that dies unnoticed leaves its key here
+/// until then; that key opens nothing, and the handshake never sends it.
 static KEY: std::sync::Mutex<Option<Key>> = std::sync::Mutex::new(None);
+
+/// Forgets the session key: the phone server it belonged to has been stopped, or is gone.
+pub fn end_session() {
+    *KEY.lock().unwrap() = None;
+}
 
 /// The running phone server's session key, for the mic and control connections.
 pub fn session_key() -> Option<Key> {
@@ -400,7 +407,7 @@ impl Adb {
     /// The returned child is the `adb shell` that hosts it; its stdout carries the server's log.
     pub fn start_server(&self, serial: &str) -> Result<Child, String> {
         // The last server's key dies with it; until the new server is up, nothing may connect.
-        *KEY.lock().unwrap() = None;
+        end_session();
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
         let key = Key::generate().map_err(|e| format!("session key: {e}"))?;
         let script = server_script(&server_args(strength(), |k| std::env::var(k).ok()));
@@ -431,8 +438,15 @@ impl Adb {
         if let Some(err) = child.stderr.take() {
             pipe_to_log(err);
         }
-        let mic = self.forward(serial, MIC_PORT, "tpl_mic")?;
-        let ctl = self.forward(serial, CTL_PORT, "tpl_ctl")?;
+        let forwarded = self.forward(serial, MIC_PORT, "tpl_mic").and_then(|mic| Ok((mic, self.forward(serial, CTL_PORT, "tpl_ctl")?)));
+        let (mic, ctl) = match forwarded {
+            Ok(ports) => ports,
+            Err(e) => {
+                // Nobody will ever hold this server's key, so don't leave it running.
+                let _ = child.kill();
+                return Err(e);
+            }
+        };
         MIC.store(mic, Ordering::Relaxed);
         CTL.store(ctl, Ordering::Relaxed);
         // Only now, with the ports known, may the mic and control threads connect.
@@ -460,7 +474,7 @@ impl Adb {
     }
 
     pub fn stop_server(&self, serial: &str) {
-        *KEY.lock().unwrap() = None;
+        end_session();
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
         let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", mic_port())]);
         let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", ctl_port())]);
@@ -480,9 +494,33 @@ fn hex(b: &[u8]) -> String {
 fn pipe_to_log(r: impl Read + Send + 'static) {
     let _ = std::thread::Builder::new().name("tpl-phone-log".into()).spawn(move || {
         for line in BufReader::new(r).lines().map_while(Result::ok) {
-            crate::log::line(format!("phone: {}", line.trim_end()));
+            crate::log::line(format!("phone: {}", hide_keys(line.trim_end())));
         }
     });
+}
+
+/// A phone log line with every run of 64 or more hex digits replaced. The phone server never prints the session
+/// key, and adb doesn't echo what is written to a command's input; this is for the day either stops being true
+/// (a terminal on the phone's side would echo the key line back, straight into this log).
+fn hide_keys(line: &str) -> std::borrow::Cow<'_, str> {
+    const KEY_HEX: usize = tpl_auth::KEY_LEN * 2;
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let (mut copied, mut i) = (0, 0);
+    while i < bytes.len() {
+        let run = bytes[i..].iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if run >= KEY_HEX {
+            out.push_str(&line[copied..i]);
+            out.push_str("[hidden]");
+            copied = i + run;
+        }
+        i += run.max(1);
+    }
+    if copied == 0 {
+        return line.into();
+    }
+    out.push_str(&line[copied..]);
+    out.into()
 }
 
 /// The phone-server argument for `TPL_MAXGAIN` (" maxgain=12"), or nothing. Only a plain number from 0 to 24 dB is
@@ -628,6 +666,19 @@ mod tests {
         let mut line = Vec::new();
         Key::from_bytes([0xab; 32]).send(&mut line).unwrap();
         assert_eq!(line, format!("{}\n", "ab".repeat(32)).into_bytes());
+    }
+
+    #[test]
+    fn a_key_echoed_into_the_phone_log_is_hidden() {
+        let key = "ab".repeat(32);
+        assert_eq!(hide_keys(&key), "[hidden]");
+        assert_eq!(hide_keys(&format!("echo {key} and {}!", key.to_uppercase())), "echo [hidden] and [hidden]!");
+        assert_eq!(hide_keys(&format!("{key}{key}0")), "[hidden]");
+        // Ordinary lines pass through untouched, shorter hex included (63 digits here), and so does non-ASCII text.
+        for plain in ["client connected; starting mic", "", "first audio 412 ms after connect", &key[1..], "caf\u{e9} deadbeef \u{2014} ok"] {
+            assert_eq!(hide_keys(plain), plain);
+        }
+        assert_eq!(hide_keys(&format!("\u{e9}{key}\u{e9}")), "\u{e9}[hidden]\u{e9}");
     }
 
     #[test]
