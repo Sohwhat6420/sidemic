@@ -1,6 +1,6 @@
 [package]
 name = "tpl-desktop"
-version = "1.0.0"
+version = "1.0.1"
 description = "Sidemic: your phone as the laptop's microphone and speaker source"
 edition.workspace = true
 license.workspace = true
@@ -23,6 +23,8 @@ base64 = "0.22"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 tpl-policy = { path = "../../../crates/policy" }
+# The per-session key and handshake on the phone server's mic and control sockets.
+tpl-auth = { path = "../../../crates/auth" }
 # WebRTC's AEC3 echo canceller, ported to Rust (MIT OR BSD-3-Clause): takes the speakers out of the phone mic.
 aec3 = { version = "=0.4.0", default-features = false }
 # Reads our own HKCU Run value as UTF-16 (the version auto-launch already pulls in).

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::{eCapture, eRender};
 
-use crate::adb::mic_port;
+use tpl_auth::Channel;
+
+use crate::adb::{mic_port, session_key, HANDSHAKE};
 use crate::echo;
 use crate::wasapi::{self, Capture, Render, RATE};
 
@@ -126,6 +128,8 @@ struct PhoneStream {
 
 impl PhoneStream {
     fn connect() -> std::io::Result<PhoneStream> {
+        // No phone server of ours is running: nothing to connect to, and nothing to prove to it.
+        let key = session_key().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no phone server session"))?;
         let sock = TcpStream::connect_timeout(&([127, 0, 0, 1], mic_port()).into(), Duration::from_millis(500))?;
         sock.set_nodelay(true)?;
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RATE as usize)));
@@ -141,6 +145,13 @@ impl PhoneStream {
                 }
             }
             let _dead = Dead(a);
+            // Prove this session's key, and have the phone prove it too, before a byte counts as audio. Until
+            // then the phone hasn't opened its mic. This runs here, not on the mic loop, because it waits on the
+            // phone over Wi-Fi; a failure ends the stream like any other drop, and the loop tries again.
+            if let Err(e) = tpl_auth::prove_tcp(&mut s, &key, Channel::Mic, HANDSHAKE) {
+                crate::log::line(format!("mic: the phone's mic socket didn't complete the session handshake ({e})"));
+                return;
+            }
             let mut buf = [0u8; 960];
             let mut carry: Option<u8> = None;
             let mut jitter = Jitter::default();
@@ -372,6 +383,13 @@ fn run(rx: Receiver<Route>, status: Arc<MicStatus>, events: Sender<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_a_session_key_the_phone_mic_is_never_dialled() {
+        // No phone server was started here, so there is no key, and the mic port isn't even connected to.
+        let e = PhoneStream::connect().err().expect("connected without a session key");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
+    }
 
     /// Plays `secs` of a link that delivers `burst_ms` of audio every `burst_ms` (offset by a repeating
     /// jitter pattern), pulling 5 ms every 5 ms like the cable loop. Returns the ms of audio that came up short

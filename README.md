@@ -322,9 +322,9 @@ and fixed, one API call at a time.
 - **Wireless debugging is the only link**, so the phone needs Developer options and one tap on the tile after
   each restart (see the caution above).
 - **Tested on two phones and one laptop.** Other phones are listed as untested in the compatibility table.
-- **The phone's two sockets aren't authenticated yet.** While the phone server runs, any program on the PC can
-  connect to its forwarded ports, and connecting to the mic port starts the phone mic. See
-  [SECURITY.md](SECURITY.md) for what that means and what to do on a shared PC.
+- **A program that can use adb on your PC can still reach the phone.** The phone's mic and control sockets are
+  locked with a per-session key (1.0.1), so merely connecting to their ports gets nothing; but adb itself gives
+  its callers a shell on the phone. See [SECURITY.md](SECURITY.md) for what the key does and doesn't stop.
 - **The installer isn't code-signed yet**, so check its SHA-256 against the release page.
 
 ## Roadmap
@@ -336,12 +336,12 @@ and fixed, one API call at a time.
 - [x] Pause / Resume, and recovery if the window ever stops responding
 - [x] Installed on the author's laptop (since 27 Oct 2026)
 - [x] First public release (1.0): installer and phone files built by CI from a clean checkout, with a SHA-256
+- [x] A per-session key on the phone's mic and control sockets (1.0.1)
 - [ ] Home-screen control panel on the phone (a web app, nothing to install)
 - [ ] **Optional companion app** (after 1.0): no Developer options, no tap after a phone restart, and a Quick
       Settings tile
 - [ ] Bluetooth-tethering fallback when the phone's Wi-Fi is off
 - [ ] Reverse audio (PC sound to the phone or earbuds)
-- [ ] A per-session secret on the phone's mic and control sockets
 - [ ] Code-signed installer
 
 ## Build from source
@@ -390,6 +390,7 @@ adb shell CLASSPATH=/data/local/tmp/tpl/tpl-server.jar app_process / com.truepho
 | `crates/voice/` | The voice chain: DeepFilterNet 3 or RNNoise, leveller, look-ahead limiter |
 | `crates/voice-jni/` | The JNI bridge that runs the voice chain inside the phone server |
 | `crates/voice-bench/` | Offline A/B bench used to pick the chain |
+| `crates/auth/` | The per-session key and handshake on the phone's two sockets, tested against the phone's Java |
 | `phone-server/` | The server run on the phone: mic capture, media watcher, wallpaper, control channel |
 | `docs/` | Write-ups, starting with [efficiency](docs/efficiency.md) |
 

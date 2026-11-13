@@ -1,5 +1,5 @@
 //! The phone's control channel (JSON lines over the adb-forwarded tpl_ctl socket): battery, media and wallpaper
-//! arrive here; play/pause/duck/volume go out.
+//! arrive here; play/pause/duck/volume go out. Like the mic socket, it opens with the session handshake.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::adb::ctl_port;
+use tpl_auth::Channel;
+
+use crate::adb::{ctl_port, session_key, HANDSHAKE};
 
 #[derive(Debug)]
 pub enum PhoneEvent {
@@ -34,11 +36,16 @@ pub struct PhoneControl {
 }
 
 impl PhoneControl {
-    /// Connects and starts a reader thread. Returns false when the phone server isn't answering yet.
+    /// Connects, proves this session's key (and has the phone prove it too), and starts a reader thread. Returns
+    /// false when the phone server isn't answering yet, or when either side fails the handshake.
     pub fn connect(&self, events: Sender<PhoneEvent>) -> bool {
-        let Ok(sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], ctl_port()).into(), Duration::from_secs(1)) else {
+        let Some(key) = session_key() else { return false };
+        let Ok(mut sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], ctl_port()).into(), Duration::from_secs(1)) else {
             return false;
         };
+        if tpl_auth::prove_tcp(&mut sock, &key, Channel::Ctl, HANDSHAKE).is_err() {
+            return false;
+        }
         let Ok(read) = sock.try_clone() else { return false };
         *self.sock.lock().unwrap() = Some(sock);
         let me = self.clone();
