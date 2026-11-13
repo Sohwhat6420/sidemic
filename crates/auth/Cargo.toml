@@ -1,0 +1,17 @@
+[package]
+name = "tpl-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Sidemic: the per-session key and handshake that guard the phone server's mic and control sockets"
+
+[lib]
+name = "tpl_auth"
+
+[dependencies]
+# HMAC-SHA-256 from RustCrypto (sha2 is already used by the desktop); `verify_slice` compares in constant time.
+hmac = "0.12"
+sha2 = "0.10"
+# The operating system's random numbers (ProcessPrng on Windows), for the key and the PC's nonce.
+getrandom = "0.3"

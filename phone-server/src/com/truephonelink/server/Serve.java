@@ -7,10 +7,10 @@ import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
-import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Looper;
 import android.util.Base64;
 
 import org.json.JSONException;
@@ -26,6 +26,7 @@ import java.util.Map;
 
 /**
  * The laptop app's phone side: the mic on localabstract:tpl_mic, and a control channel on localabstract:tpl_ctl.
+ * Every connection to either must first prove the session key the laptop wrote to standard input (see Auth).
  *
  * Control channel, one JSON object per line.
  *   phone to laptop: {"t":"hello","name","model","android"}  {"t":"battery","level","charging"}
@@ -40,31 +41,46 @@ final class Serve {
     private Serve() {
     }
 
-    static void run(Map<String, String> o) throws IOException {
-        LocalServerSocket mic = new LocalServerSocket("tpl_mic");
+    static void run(final Map<String, String> o) throws IOException {
+        // Both sockets sit behind a door (Gate): a connection is served only after it proves this session's key.
+        final byte[] key = Auth.readKey(System.in);
+        final LocalGate mic = new LocalGate("tpl_mic", key, Auth.MIC) {
+            @Override
+            void serve(LocalSocket client) {
+                Main.micClient(o, client);
+            }
+        };
         // Anonymous classes, not lambdas: the build compiles against android.jar, which has no LambdaMetafactory.
         Thread micThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                while (true) {
-                    try {
-                        Main.micClient(o, mic.accept());
-                    } catch (IOException e) {
-                        Log.e("mic accept: " + e);
-                        return;
-                    }
+                try {
+                    mic.run();
+                } catch (IOException e) {
+                    Log.e("mic accept: " + e);
                 }
             }
         }, "tpl-mic");
         micThread.setDaemon(true);
         micThread.start();
 
-        LocalServerSocket ctl = new LocalServerSocket("tpl_ctl");
-        Log.i("serving localabstract:tpl_mic and localabstract:tpl_ctl");
-        while (true) {
-            LocalSocket client = ctl.accept();
-            new Control(client).run();
-        }
+        LocalGate ctl = new LocalGate("tpl_ctl", key, Auth.CTL) {
+            @Override
+            void serve(LocalSocket client) {
+                // The control channel used to be served on the main thread, which has a Looper; give this one its
+                // own, so anything in Android that asks for the calling thread's Looper finds one as before.
+                if (Looper.myLooper() == null) {
+                    Looper.prepare();
+                }
+                try {
+                    new Control(client).run();
+                } catch (IOException e) {
+                    Log.i("control: " + e.getMessage());
+                }
+            }
+        };
+        Log.i("serving localabstract:tpl_mic and localabstract:tpl_ctl, each behind this session's key");
+        ctl.run();
     }
 
     /** One laptop connection. Returns when the laptop goes away. */

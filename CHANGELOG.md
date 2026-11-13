@@ -5,9 +5,41 @@ lists its SHA-256.
 
 ## [Unreleased]
 
-Planned (see the README's Roadmap): a per-session secret on the phone's mic and control sockets, a code-signed
-installer, a home-screen control panel on the phone, an optional companion app, a Bluetooth-tethering fallback
-and reverse audio.
+Planned (see the README's Roadmap): a code-signed installer, a home-screen control panel on the phone, an
+optional companion app, a Bluetooth-tethering fallback and reverse audio.
+
+## [1.0.1] - 2026-11-13
+
+A security fix: the phone's mic and control sockets now ask for a per-session key. Nothing else changes.
+
+### Security
+- **The phone's mic and control sockets are locked with a per-session key.** In 1.0.0 and earlier, any program
+  on the PC (run by any user of it) could connect to the forwarded mic port and record from the phone, or send
+  the control port play/pause and volume commands (1.0.0's Known limits). Now Sidemic makes a fresh 32-byte
+  random key each time it starts the phone server and hands it over through the `adb shell` session's standard
+  input: never a command line, a file or a log. Every connection must prove the key (HMAC-SHA-256 over a
+  challenge from each side, checked in constant time) and the phone proves it back, before any audio or control
+  message flows. A connection that doesn't is closed, within 3 seconds if it says nothing, and **the phone's mic
+  is never opened for it**.
+- This does not stop a program that can use adb on the PC: adb gives its callers a shell on the phone, whatever
+  Sidemic does. SECURITY.md says what the key stops and what it can't.
+
+### Changed
+- The phone server's `stream` and `serve` modes exit unless they are given a session key on standard input.
+  To record by hand without the desktop app, use `mode=record`.
+- When the control socket hasn't completed the handshake after about 20 seconds of trying, the desktop restarts
+  the phone server and says so in the log. (Before, only a refused TCP connection led to a restart.)
+- Lines from the phone that go into the desktop's log have any run of 64 or more hex digits replaced, in case a
+  key is ever echoed back.
+
+### Added
+- A `tpl-auth` crate with the PC's half of the handshake, and tests that run it against the phone's own Java
+  classes over a loopback socket: a connection that proves nothing, a wrong key, the other socket's proof and a
+  replayed proof are all refused, and no log line contains the key. CI runs them on Windows and Linux.
+
+### Known limits
+- A program that can use adb on the PC can still reach the phone, and a flood of connections can still cost you
+  the phone mic for a while (Sidemic falls back to the laptop mic). See SECURITY.md.
 
 ## [1.0.0] - 2026-11-12
 
@@ -85,6 +117,7 @@ The first tagged version: the app as it has run on the author's laptop since 27 
 - **15–16 Oct:** Pause/Resume, one-click Undo, a week-long live run, and the efficiency pass from about 800 MB and
   a busy core down to about 9 MB idle.
 
-[Unreleased]: https://github.com/Sohwhat6420/sidemic/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Sohwhat6420/sidemic/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Sohwhat6420/sidemic/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Sohwhat6420/sidemic/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/Sohwhat6420/sidemic/releases/tag/v0.1.0

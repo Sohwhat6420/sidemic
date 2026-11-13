@@ -4,7 +4,6 @@ import android.content.Context;
 import android.media.AudioManager;
 import android.media.MicrophoneInfo;
 import android.media.audiofx.AudioEffect;
-import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -26,6 +25,8 @@ import java.util.Map;
  *           Sends raw s16le mono 48 kHz (after the DSP chain unless dsp=0).
  *   serve   what the laptop app runs: the mic on localabstract:tpl_mic (as stream) plus a control channel on
  *           localabstract:tpl_ctl (JSON lines: battery, media, wallpaper out; media and volume commands in)
+ *   stream and serve read a session key from standard input (64 hex digits and a newline) and serve a connection
+ *   only after it proves that key (see Auth). Without a key they exit. To record without the laptop app, use record.
  *   wallpaper  report the lock/home wallpapers and save thumbnails to {out}-lock.png / {out}-home.png
  *              watch=1 keeps {out}-lock.png current and prints "wallpaper-changed lock id=N" on each change
  *
@@ -238,13 +239,16 @@ public final class Main {
         Log.i("wrote " + out + "-raw.wav" + (dsp != null ? " and " + out + "-dsp.wav" : ""));
     }
 
-    private static void stream(Map<String, String> o) throws IOException {
+    private static void stream(final Map<String, String> o) throws IOException {
         boolean useDsp = !"0".equals(get(o, "dsp", "1"));
-        LocalServerSocket server = new LocalServerSocket("tpl_mic");
-        Log.i("listening on localabstract:tpl_mic (dsp=" + (useDsp ? "on" : "off") + ")");
-        while (true) {
-            micClient(o, server.accept());
-        }
+        LocalGate mic = new LocalGate("tpl_mic", Auth.readKey(System.in), Auth.MIC) {
+            @Override
+            void serve(LocalSocket client) {
+                micClient(o, client);
+            }
+        };
+        Log.i("listening on localabstract:tpl_mic behind the session key (dsp=" + (useDsp ? "on" : "off") + ")");
+        mic.run();
     }
 
     /** Streams the mic to one client until it disconnects. The mic is only on while a client is connected. */

@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 use sha2::{Digest, Sha256};
+use tpl_auth::Key;
 use tpl_voice::{NsKind, Params, Strength};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -29,6 +30,27 @@ pub fn mic_port() -> u16 {
 pub fn ctl_port() -> u16 {
     CTL.load(Ordering::Relaxed)
 }
+
+/// The key of the phone server now running, which every connection to its two sockets must prove (see the
+/// `tpl-auth` crate). A fresh one is made each time the server is started and it lives in memory only. It is
+/// `None` until a server has been started, while one is being started, and once this app stops one or finds it
+/// gone ([`end_session`]), and nothing connects without one. A server that dies unnoticed leaves its key here
+/// until then; that key opens nothing, and the handshake never sends it.
+static KEY: std::sync::Mutex<Option<Key>> = std::sync::Mutex::new(None);
+
+/// Forgets the session key: the phone server it belonged to has been stopped, or is gone.
+pub fn end_session() {
+    *KEY.lock().unwrap() = None;
+}
+
+/// The running phone server's session key, for the mic and control connections.
+pub fn session_key() -> Option<Key> {
+    KEY.lock().unwrap().clone()
+}
+
+/// How long the mic and control connections give the phone to finish the handshake. It is two round trips over
+/// Wi-Fi, which a phone with its screen off can stretch to a few hundred milliseconds.
+pub const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The port `adb forward tcp:0 …` printed (it prints the free port it chose, alone on a line).
 fn parse_forward_port(stdout: &str) -> Option<u16> {
@@ -384,18 +406,30 @@ impl Adb {
     /// Starts the phone server (stopping any older copy first) and forwards its sockets.
     /// The returned child is the `adb shell` that hosts it; its stdout carries the server's log.
     pub fn start_server(&self, serial: &str) -> Result<Child, String> {
+        // The last server's key dies with it; until the new server is up, nothing may connect.
+        end_session();
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
-        let args = server_args(strength(), |k| std::env::var(k).ok());
-        let script = format!(
-            "CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve {args} lib={REMOTE_DIR}/{VOICE_LIB}"
-        );
+        let key = Key::generate().map_err(|e| format!("session key: {e}"))?;
+        let script = server_script(&server_args(strength(), |k| std::env::var(k).ok()));
         let mut child = self
             .cmd()
             .args(["-s", serial, "shell", &script])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("adb shell: {e}"))?;
+        // The key goes to the server's standard input, through this adb shell session: never on the command line
+        // (other programs can read those, here and on the phone) and never into the log. The pipe is left open in
+        // `child` for the server's whole life; closing it would only tell adb that the input has ended.
+        let sent = match child.stdin.as_mut() {
+            Some(stdin) => key.send(stdin).map_err(|e| format!("session key: {e}")),
+            None => Err("session key: adb shell has no standard input".to_owned()),
+        };
+        if let Err(e) = sent {
+            let _ = child.kill();
+            return Err(e);
+        }
         // The server's log goes to the app's log. It must be read either way: a full pipe would block adb, and
         // with it the server's next log line and the mic thread behind it.
         if let Some(out) = child.stdout.take() {
@@ -404,11 +438,20 @@ impl Adb {
         if let Some(err) = child.stderr.take() {
             pipe_to_log(err);
         }
-        let mic = self.forward(serial, MIC_PORT, "tpl_mic")?;
-        let ctl = self.forward(serial, CTL_PORT, "tpl_ctl")?;
+        let forwarded = self.forward(serial, MIC_PORT, "tpl_mic").and_then(|mic| Ok((mic, self.forward(serial, CTL_PORT, "tpl_ctl")?)));
+        let (mic, ctl) = match forwarded {
+            Ok(ports) => ports,
+            Err(e) => {
+                // Nobody will ever hold this server's key, so don't leave it running.
+                let _ = child.kill();
+                return Err(e);
+            }
+        };
         MIC.store(mic, Ordering::Relaxed);
         CTL.store(ctl, Ordering::Relaxed);
-        crate::log::line(format!("forwarded: mic on port {mic}, control on port {ctl}"));
+        // Only now, with the ports known, may the mic and control threads connect.
+        *KEY.lock().unwrap() = Some(key);
+        crate::log::line(format!("forwarded: mic on port {mic}, control on port {ctl}; both need this session's key"));
         Ok(child)
     }
 
@@ -431,10 +474,17 @@ impl Adb {
     }
 
     pub fn stop_server(&self, serial: &str) {
+        end_session();
         let _ = self.shell(serial, "pkill -f com.truephonelink.server");
         let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", mic_port())]);
         let _ = self.run(&["-s", serial, "forward", "--remove", &format!("tcp:{}", ctl_port())]);
     }
+}
+
+/// The command line that starts the phone server. It is visible to other programs (in the PC's process list, and
+/// on the phone to anything running as the shell user), so the session key is not part of it.
+fn server_script(args: &str) -> String {
+    format!("CLASSPATH={REMOTE_DIR}/{JAR} app_process / com.truephonelink.server.Main mode=serve {args} lib={REMOTE_DIR}/{VOICE_LIB}")
 }
 
 fn hex(b: &[u8]) -> String {
@@ -444,9 +494,33 @@ fn hex(b: &[u8]) -> String {
 fn pipe_to_log(r: impl Read + Send + 'static) {
     let _ = std::thread::Builder::new().name("tpl-phone-log".into()).spawn(move || {
         for line in BufReader::new(r).lines().map_while(Result::ok) {
-            crate::log::line(format!("phone: {}", line.trim_end()));
+            crate::log::line(format!("phone: {}", hide_keys(line.trim_end())));
         }
     });
+}
+
+/// A phone log line with every run of 64 or more hex digits replaced. The phone server never prints the session
+/// key, and adb doesn't echo what is written to a command's input; this is for the day either stops being true
+/// (a terminal on the phone's side would echo the key line back, straight into this log).
+fn hide_keys(line: &str) -> std::borrow::Cow<'_, str> {
+    const KEY_HEX: usize = tpl_auth::KEY_LEN * 2;
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let (mut copied, mut i) = (0, 0);
+    while i < bytes.len() {
+        let run = bytes[i..].iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if run >= KEY_HEX {
+            out.push_str(&line[copied..i]);
+            out.push_str("[hidden]");
+            copied = i + run;
+        }
+        i += run.max(1);
+    }
+    if copied == 0 {
+        return line.into();
+    }
+    out.push_str(&line[copied..]);
+    out.into()
 }
 
 /// The phone-server argument for `TPL_MAXGAIN` (" maxgain=12"), or nothing. Only a plain number from 0 to 24 dB is
@@ -578,6 +652,39 @@ mod tests {
         assert_eq!(first(adb_candidates(Some(own.clone().into()), None, Some(&local), None)), Some(own));
         let gone = s.0.join("gone/adb.exe");
         assert_eq!(first(adb_candidates(Some(gone.into()), None, None, Some(&path))), Some(on_path));
+    }
+
+    #[test]
+    fn the_phone_command_line_is_unchanged_and_carries_no_key() {
+        // The whole command line, word for word: the key goes to the server's standard input instead.
+        assert_eq!(
+            server_script(&server_args(Strength::Medium, no_env)),
+            "CLASSPATH=/data/local/tmp/tpl/tpl-server.jar app_process / com.truephonelink.server.Main mode=serve \
+             source=voice-recognition engine=native denoise=dfn atten=18 expand=0 dsp=1 maxgain=18 \
+             lib=/data/local/tmp/tpl/libtpl_voice_jni.so"
+        );
+        let mut line = Vec::new();
+        Key::from_bytes([0xab; 32]).send(&mut line).unwrap();
+        assert_eq!(line, format!("{}\n", "ab".repeat(32)).into_bytes());
+    }
+
+    #[test]
+    fn a_key_echoed_into_the_phone_log_is_hidden() {
+        let key = "ab".repeat(32);
+        assert_eq!(hide_keys(&key), "[hidden]");
+        assert_eq!(hide_keys(&format!("echo {key} and {}!", key.to_uppercase())), "echo [hidden] and [hidden]!");
+        assert_eq!(hide_keys(&format!("{key}{key}0")), "[hidden]");
+        // Ordinary lines pass through untouched, shorter hex included (63 digits here), and so does non-ASCII text.
+        for plain in ["client connected; starting mic", "", "first audio 412 ms after connect", &key[1..], "caf\u{e9} deadbeef \u{2014} ok"] {
+            assert_eq!(hide_keys(plain), plain);
+        }
+        assert_eq!(hide_keys(&format!("\u{e9}{key}\u{e9}")), "\u{e9}[hidden]\u{e9}");
+    }
+
+    #[test]
+    fn there_is_no_session_key_until_a_server_is_started() {
+        // Nothing in the tests starts a phone server, so nothing may hand out a key (and so nothing connects).
+        assert!(session_key().is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The phone's control channel (JSON lines over the adb-forwarded tpl_ctl socket): battery, media and wallpaper
-//! arrive here; play/pause/duck/volume go out.
+//! arrive here; play/pause/duck/volume go out. Like the mic socket, it opens with the session handshake.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::adb::ctl_port;
+use tpl_auth::Channel;
+
+use crate::adb::{ctl_port, session_key, HANDSHAKE};
 
 #[derive(Debug)]
 pub enum PhoneEvent {
@@ -28,21 +30,37 @@ pub enum PhoneEvent {
     Gone,
 }
 
+/// How an attempt to open the control channel ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Connect {
+    /// Connected and both sides proved the session key.
+    Ready,
+    /// No phone server session, or nothing answering on the forwarded port.
+    Unreachable,
+    /// The port answered but the handshake didn't complete (why, for the log): the phone server is usually still
+    /// starting.
+    Unproven(String),
+}
+
 #[derive(Clone, Default)]
 pub struct PhoneControl {
     sock: Arc<Mutex<Option<TcpStream>>>,
 }
 
 impl PhoneControl {
-    /// Connects and starts a reader thread. Returns false when the phone server isn't answering yet.
-    pub fn connect(&self, events: Sender<PhoneEvent>) -> bool {
-        let Ok(sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], ctl_port()).into(), Duration::from_secs(1)) else {
-            return false;
+    /// Connects, proves this session's key (and has the phone prove it too), and starts a reader thread.
+    pub fn connect(&self, events: Sender<PhoneEvent>) -> Connect {
+        let Some(key) = session_key() else { return Connect::Unreachable };
+        let Ok(mut sock) = TcpStream::connect_timeout(&([127, 0, 0, 1], ctl_port()).into(), Duration::from_secs(1)) else {
+            return Connect::Unreachable;
         };
-        let Ok(read) = sock.try_clone() else { return false };
+        if let Err(e) = tpl_auth::prove_tcp(&mut sock, &key, Channel::Ctl, HANDSHAKE) {
+            return Connect::Unproven(e.to_string());
+        }
+        let Ok(read) = sock.try_clone() else { return Connect::Unreachable };
         *self.sock.lock().unwrap() = Some(sock);
         let me = self.clone();
-        thread::Builder::new()
+        let started = thread::Builder::new()
             .name("tpl-phone".into())
             .spawn(move || {
                 for line in BufReader::new(read).lines() {
@@ -79,7 +97,12 @@ impl PhoneControl {
                 *me.sock.lock().unwrap() = None;
                 let _ = events.send(PhoneEvent::Gone);
             })
-            .is_ok()
+            .is_ok();
+        if started {
+            Connect::Ready
+        } else {
+            Connect::Unreachable
+        }
     }
 
     pub fn connected(&self) -> bool {

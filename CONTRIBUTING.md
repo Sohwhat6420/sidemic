@@ -30,6 +30,14 @@ cargo test -p tpl-policy -p tpl-voice
 cargo test --release -p tpl-voice -- --include-ignored   # DeepFilterNet only builds its graph in release
 ```
 
+The session handshake on the phone's two sockets has its own suite, for Windows and Linux. It also needs a JDK
+(`javac` and `java`, from `JAVA_HOME` or the PATH), because it compiles the phone's handshake classes and runs
+the PC's half against them over a loopback socket:
+
+```bash
+cargo test -p tpl-auth
+```
+
 CI runs all of these on every push and pull request (`.github/workflows/test.yml`), and `build.yml` builds the
 phone server, the phone's voice chain and the Windows installer from a clean checkout. Building the real app
 yourself needs the full toolchain under "Build from source" in the README.
@@ -49,6 +57,8 @@ yourself needs the full toolchain under "Build from source" in the README.
 - Console tools (adb, reg) start with `CREATE_NO_WINDOW`, so nothing flashes on screen; please do the same for
   any new one.
 - The two scrcpy-derived files in `phone-server/` stay under Apache-2.0; everything else is MIT.
+- Anything that changes who can reach the phone's sockets, or how the session key travels, needs a test in
+  `crates/auth/` and a line in SECURITY.md. The key must never reach a command line, a file or a log.
 - British English in docs and UI copy.
 
 ## Good first issues
